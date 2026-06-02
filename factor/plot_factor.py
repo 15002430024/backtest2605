@@ -13,7 +13,6 @@ CSV：十分组净值/超额净值（equal+factor 各一份）、IC 明细、IC 
 滚动夏普/波动不手写——复用 analysis.build_report_data（同一份滚动公式，不留副本）。
 滚动 IC 窗口单位是「调仓期数」（月频 12 期=1 年），复用 factor_test._PPY，与 IC 年化口径一致。
 """
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -22,10 +21,8 @@ import matplotlib
 matplotlib.use("Agg")  # 无显示环境出图
 import matplotlib.pyplot as plt
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))                      # factor/（import factor_test._PPY）
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "analysis"))  # analysis（import build_report_data）
-from factor_test import _PPY  # noqa: E402  单一真相源：调仓频率→年化期数，滚动 IC 窗口复用
-from metrics import build_report_data  # noqa: E402  滚动夏普/波动复用，不重写
+from factor.factor_test import _PPY  # 单一真相源：调仓频率→年化期数，滚动 IC 窗口复用
+from analysis.metrics import build_report_data  # 滚动夏普/波动复用，不重写
 
 
 def _setup_chinese_font():

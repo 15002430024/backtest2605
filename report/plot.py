@@ -8,7 +8,6 @@
 ReportData 的已算好字段 + ax 渲染。风格：白底、深蓝主色、暖灰基准、细网格、
 去顶/右边框、顶部 KPI 条。
 """
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -18,8 +17,7 @@ matplotlib.use("Agg")  # 无显示环境出图
 import matplotlib.pyplot as plt
 from matplotlib import gridspec
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "analysis"))
-from metrics import build_report_data  # noqa: E402
+from analysis.metrics import build_report_data
 
 # ── 配色（机构研报风）──
 C_STRATEGY = "#1f3a5f"   # 策略：深蓝

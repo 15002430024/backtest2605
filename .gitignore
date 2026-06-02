@@ -6,6 +6,12 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 
+# 可编辑安装产物（pip install -e .）
+*.egg-info/
+.eggs/
+build/
+dist/
+
 # Virtual environments
 .venv/
 venv/

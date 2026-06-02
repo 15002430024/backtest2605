@@ -8,20 +8,16 @@
 """
 
 import sys
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))         # factor/（import factor_test）
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # backtest 根（import engine）
-
-from factor_test import (  # noqa: E402
+from factor.factor_test import (
     build_factor_panel, build_universe_mask, compute_forward_returns, compute_ic,
     assign_groups, build_group_weights, build_long_short_weights,
     backtest_groups, backtest_short_only, backtest_long_short, _bt_end,
 )
-from engine.backtest import run_backtest  # noqa: E402
+from engine.backtest import run_backtest
 
 
 def _assert(cond, msg):
@@ -187,7 +183,8 @@ def run_synthetic():
 # 真实数据 sanity（20 日动量/反转），打印不 assert
 # ============================================================
 def run_real():
-    from factor_test import load_calendar, load_price_df, run_factor_test
+    from factor.factor_test import run_factor_test
+    from data.loaders import load_calendar, load_price_df
     print("=" * 60, "\n真实数据 sanity：20 日动量，全市场，月频，对 000001.SH 超额\n" + "=" * 60)
     start, end = "2022-01-01", "2022-12-31"
     load_start = "2021-09-01"                    # 20 日动量需前置 lookback

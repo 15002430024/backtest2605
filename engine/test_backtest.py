@@ -22,7 +22,7 @@
 import numpy as np
 import pandas as pd
 
-from backtest import (
+from engine.backtest import (
     run_backtest,
     update_weights,
     calc_trades,

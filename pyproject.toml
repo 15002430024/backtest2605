@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "backtest-framework"
+version = "0.1.0"
+description = "A股量化回测框架（数据层/引擎层/分析层/报告层/因子层）"
+requires-python = ">=3.8"
+dependencies = ["pandas", "numpy", "matplotlib", "pyarrow"]
+
+# 五个层作为顶层包，统一 `from <层>.<模块> import`（engine/analysis/report/factor/data）。
+# 装一次 `pip install -e .` 后任意目录、任意跑法都能导入，不再手改 sys.path。
+[tool.setuptools]
+packages = ["engine", "analysis", "report", "factor", "data"]

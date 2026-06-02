@@ -4,19 +4,14 @@
   出图落盘：跑真实引擎输出 → plot_dashboard，断言文件落盘、非空
 运行: conda activate torch1010 && python test_report.py
 """
-import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(_ROOT / "engine"))
-sys.path.insert(0, str(_ROOT / "analysis"))
-sys.path.insert(0, str(Path(__file__).resolve().parent))  # report/（import plot）
-from backtest import run_backtest, calc_benchmark  # noqa: E402
-from metrics import calc_metrics  # noqa: E402
-from plot import plot_dashboard  # noqa: E402
+from engine.backtest import run_backtest, calc_benchmark
+from analysis.metrics import calc_metrics
+from report.plot import plot_dashboard
 
 TOL = 1e-9
 OUT_DIR = Path(__file__).parent / "_test_output"
