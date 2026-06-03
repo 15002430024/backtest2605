@@ -18,6 +18,7 @@ import matplotlib.pyplot as plt
 from matplotlib import gridspec
 
 from analysis.metrics import build_report_data
+from analysis.plot_style import setup_chinese_font  # 跨平台中文字体，单一真相源
 
 # ── 配色（机构研报风）──
 C_STRATEGY = "#1f3a5f"   # 策略：深蓝
@@ -31,8 +32,7 @@ C_KPI_BG = "#1f3a5f"
 
 def _apply_style():
     """统一 rcParams（中文字体 + 研报风）。所有图共用，调一次。"""
-    matplotlib.rcParams["font.sans-serif"] = ["Arial Unicode MS", "SimHei", "PingFang SC"]
-    matplotlib.rcParams["axes.unicode_minus"] = False
+    setup_chinese_font()  # 跨平台中文字体 + 负号（analysis.plot_style 单一真相源）
     matplotlib.rcParams["axes.edgecolor"] = "#666666"
     matplotlib.rcParams["axes.linewidth"] = 0.8
     matplotlib.rcParams["figure.facecolor"] = "white"

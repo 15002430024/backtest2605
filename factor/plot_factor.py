@@ -23,12 +23,7 @@ import matplotlib.pyplot as plt
 
 from factor.factor_test import _PPY  # 单一真相源：调仓频率→年化期数，滚动 IC 窗口复用
 from analysis.metrics import build_report_data  # 滚动夏普/波动复用，不重写
-
-
-def _setup_chinese_font():
-    """中文字体 + 负号正常显示（所有图共用，调一次）。"""
-    matplotlib.rcParams["font.sans-serif"] = ["STHeiti", "Songti SC", "Arial Unicode MS", "Heiti TC", "DejaVu Sans"]
-    matplotlib.rcParams["axes.unicode_minus"] = False
+from analysis.plot_style import setup_chinese_font  # 跨平台中文字体，单一真相源
 
 
 def plot_factor_report(result: dict, out_dir, weighting: str = "equal") -> None:
@@ -45,7 +40,7 @@ def plot_factor_report(result: dict, out_dir, weighting: str = "equal") -> None:
     """
     if weighting not in result["group_nav"]:
         raise ValueError(f"weighting={weighting!r} 不在 result['group_nav'] 里（可选 {list(result['group_nav'])}）")
-    _setup_chinese_font()
+    setup_chinese_font()
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 

@@ -1,0 +1,13 @@
+# bt factor 配置样例。键对应 factor_test.DEFAULT_FACTOR_CONFIG；benchmark 必填。
+# 跑：bt factor --factor 因子.parquet --config examples/factor_config.yaml --out 结果目录
+rebalance: M            # 调仓频率：M | W | D | （也可在框架内传调仓日列表，命令行用 M/W/D）
+universe: all           # all | 指数代码如 '000905.SH' | user
+n_groups: 10            # 分组数（每期有效股需 ≥ 此值）
+direction: 1            # +1 高因子看好 / -1 翻转
+benchmark: '000001.SH'  # 外部基准指数（必填，缺省入口 raise）；代码要加引号
+start_date: '2022-01-01'
+end_date: '2022-12-31'
+exclude_st: false       # 是否剔 ST
+# bt_config:            # 可选：透传 run_backtest 的摩擦配置；缺省=理想态
+#   buy_cost: 0.0003
+#   sell_cost: 0.0013

@@ -1,0 +1,10 @@
+# bt backtest 配置样例。摩擦/口径键透传 run_backtest；benchmark/end_date 是运行控制键。
+# 跑：bt backtest --weights 权重.parquet --config examples/backtest_config.yaml --out 结果目录
+weight_mode: long_only            # long_only(Σ|w|≤1) | long_short(零投资±100%)
+buy_cost: 0.0003                  # 买入费率
+sell_cost: 0.0013                 # 卖出费率（含印花税）
+slippage: 0.001                   # 滑点（作附加成本扣）
+rebalance_threshold: 0.005        # 调仓阈值：权重变动 < 此值不调
+enable_feasibility_filter: false  # 涨跌停/停牌过滤（long_short 下必须 false）
+benchmark: '000001.SH'            # 可选：出基准对比 / 超额图；代码要加引号
+end_date: '2022-12-31'            # 可选：默认=权重最后一个调仓日（设了才看得到末次调仓后的漂移）
