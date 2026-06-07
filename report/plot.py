@@ -324,3 +324,50 @@ def _save_single(plot_fn, path, rd):
     plot_fn(ax, rd)
     fig.savefig(path, dpi=150, bbox_inches="tight", facecolor="white")
     plt.close(fig)
+
+
+def plot_cash_report(result, save_dir: str = ".", title: str = "现金回测报告") -> str:
+    """现金引擎 BacktestResult → 两栏图（左：策略vs基准净值；右：超额净值）+ 存盘。
+
+    现金引擎输出是 BacktestResult（dataclass，含 strategy_nav/benchmark_nav/excess_nav
+    和中文键的 metrics_abs/metrics_excess），与权重引擎的仪表盘口径不同（这里是股数账户、
+    带超额净值），故单独一张简报，不复用 plot_dashboard（那张吃权重）。
+    """
+    _apply_style()
+    save_path = Path(save_dir)
+    save_path.mkdir(parents=True, exist_ok=True)
+    a, e = result.metrics_abs, result.metrics_excess
+
+    fig, axes = plt.subplots(1, 2, figsize=(15, 5.6))
+    fig.suptitle(title, fontsize=13, fontweight="bold")
+
+    axes[0].plot(result.strategy_nav.index, result.strategy_nav.values,
+                 label="策略", color=C_STRATEGY, lw=1.4)
+    axes[0].plot(result.benchmark_nav.index, result.benchmark_nav.values,
+                 label="基准", color=C_BENCH, lw=1.4)
+    axes[0].set_title("策略 vs 基准净值（同起点 = 1）")
+    axes[0].set_ylabel("净值")
+    axes[0].legend(loc="upper left")
+    axes[0].text(0.98, 0.03,
+                 f"年化 {a['年化收益']:.1%}  夏普 {a['夏普']:.2f}\n"
+                 f"最大回撤 {a['最大回撤']:.1%}  年化波动 {a['年化波动']:.1%}",
+                 transform=axes[0].transAxes, va="bottom", ha="right", fontsize=9,
+                 bbox=dict(boxstyle="round", fc="white", alpha=0.7))
+
+    axes[1].plot(result.excess_nav.index, result.excess_nav.values, color=C_UP, lw=1.4)
+    axes[1].axhline(1.0, color=C_GRID, lw=0.8, ls="--")
+    axes[1].set_title("超额净值（逐日算术超额累乘，起点 = 1）")
+    axes[1].set_ylabel("超额净值")
+    axes[1].text(0.02, 0.97,
+                 f"超额年化 {e['超额年化']:.1%}  信息比率 {e['信息比率']:.2f}\n"
+                 f"超额最大回撤 {e['超额最大回撤']:.1%}  跟踪误差 {e['跟踪误差']:.1%}",
+                 transform=axes[1].transAxes, va="top", fontsize=9,
+                 bbox=dict(boxstyle="round", fc="white", alpha=0.7))
+
+    for ax in axes:
+        _style_ax(ax)
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    out = save_path / "现金回测简报.png"
+    fig.savefig(out, dpi=150, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    return str(out)

@@ -344,6 +344,8 @@ def run_backtest(
         'weights':        pd.DataFrame, index=交易日, columns=code, value=当日生效后权重（缺失=0）
         'trade_records':  list[dict]，每条 {date, trades, cost, turnover}
         'blocked_trades': list[dict]，每条 {date, code, reason, intended_action, blocked_weight}
+        'missing_log':    list[dict]，每条 {date, code, weight, reason}；持仓票当天缺行(no_row)
+                          或 NaN 收益(nan_return)被当 0 的记录（行为不变，仅暴露；多为退市/长停）
       }
 
     依赖: calc_daily_returns, update_weights, skip_small_changes, calc_trades,
@@ -509,17 +511,26 @@ def run_backtest(
     weights_history = {}  # {date: {code: weight}}，记当日生效后权重（持仓类图用）
     trade_records = []    # 每次调仓的流水
     blocked_trades = []   # 被涨跌停/停牌挡下的记录
+    missing_log = []      # 持仓票当天缺行/NaN 收益被当 0 的记录（每条 date/code/weight/reason）
 
     for t in trade_dates:
         # 1) 取当日收益率
         today_returns = returns_lookup.get(t, {})
 
-        # 2) 当日组合收益 = Σ(早上权重_i × return_i)，NaN 视为 0（用旧权重，和阶段2 一致）
+        # 2) 当日组合收益 = Σ(早上权重_i × return_i)；持仓票缺行/NaN 收益仍按 0 计（行为不变），
+        #    但记进 missing_log 暴露出来（缺行=no_row 多为退市/长停，NaN=nan_return）。不 raise。
         portfolio_return = 0.0
         for code, w in current_weights.items():
-            ret = today_returns.get(code, 0.0)
-            if np.isnan(ret):
+            if code not in today_returns:
+                if w != 0.0:
+                    missing_log.append({"date": t, "code": code, "weight": w, "reason": "no_row"})
                 ret = 0.0
+            else:
+                ret = today_returns[code]
+                if np.isnan(ret):
+                    if w != 0.0:
+                        missing_log.append({"date": t, "code": code, "weight": w, "reason": "nan_return"})
+                    ret = 0.0
             portfolio_return += w * ret
 
         # 3) 更新 NAV
@@ -569,6 +580,7 @@ def run_backtest(
         "weights": weights_df_out,
         "trade_records": trade_records,
         "blocked_trades": blocked_trades,
+        "missing_log": missing_log,
     }
 
 

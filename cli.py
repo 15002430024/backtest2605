@@ -20,9 +20,10 @@ import yaml
 
 from data.loaders import load_calendar, load_price_df, load_index_eod
 from engine.backtest import run_backtest, calc_benchmark
+from engine.cash_engine import run_cash_backtest, BacktestConfig
 from factor.factor_test import run_factor_test
 from factor.plot_factor import plot_factor_report
-from report.plot import plot_dashboard
+from report.plot import plot_dashboard, plot_cash_report
 
 
 def _read_yaml(path) -> dict:
@@ -105,6 +106,54 @@ def cmd_backtest(args):
     print(f"[backtest] {Path(args.weights).name} | 区间={start.date()}~{end.date()} 股票数={len(codes)} 调仓次数={len(result['trade_records'])} "
           f"基准={benchmark or '无'}")
     print(f"  终值={nav.iloc[-1]:.4f}  → 仪表盘 {dash}")
+    ml = result["missing_log"]
+    if ml:
+        ml_codes = sorted({m["code"] for m in ml})
+        print(f"  ⚠️ 持仓缺行/NaN 收益被当 0：{len(ml)} 格 / {len(ml_codes)} 只票（多为退市/长停，残值小）：{ml_codes[:8]}")
+
+
+def _parse_pool(pool_arg):
+    """--pool 解析：none/省略 → None(全市场)；存在的文件 → 读 bool 宽表；否则当指数代码字符串。"""
+    if pool_arg is None or str(pool_arg).lower() == "none":
+        return None
+    p = Path(pool_arg)
+    if p.exists():
+        return pd.read_parquet(p) if p.suffix == ".parquet" else pd.read_csv(p, index_col=0, parse_dates=True)
+    return pool_arg  # 指数代码（如 000852.SH），resolve_pool 内部校验/报错
+
+
+def cmd_cash(args):
+    """现金回测：因子宽表 + 票池 + 基准 → run_cash_backtest → 现金简报 + CSV。"""
+    factor_wide = _read_factor_wide(args.factor)
+    raw = _read_yaml(args.config) if args.config else {}
+    cfg = BacktestConfig(
+        initial_capital=raw.get("initial_capital", 1e8),
+        n_holdings=raw.get("n_holdings", 200),
+        fee_rate=raw.get("fee_rate", 0.0014),
+        turnover_cap=raw.get("turnover_cap", 0.30),
+        start_date=raw.get("start_date"),
+    )
+    pool = _parse_pool(args.pool)
+    res = run_cash_backtest(factor_wide, pool, args.benchmark, config=cfg, end=raw.get("end_date"))
+
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    res.strategy_nav.to_csv(out / "策略净值.csv")
+    res.benchmark_nav.to_csv(out / "基准净值.csv")
+    res.excess_nav.to_csv(out / "超额净值.csv")
+    res.account.to_csv(out / "每日账户.csv")
+    res.holdings.to_csv(out / "每日持仓股数.csv")
+    res.trades.to_csv(out / "成交流水.csv", index=False)
+    res.trade_log.to_csv(out / "买卖往返.csv", index=False)
+    res.missing_log.to_csv(out / "退市清算.csv", index=False)
+    fig = plot_cash_report(res, args.out, title=f"现金回测（{Path(args.factor).stem}）")
+
+    a, e = res.metrics_abs, res.metrics_excess
+    held = int((res.holdings.iloc[-1] > 0).sum())
+    print(f"[cash] {Path(args.factor).name} | 票池={args.pool or '全市场'} 基准={args.benchmark}")
+    print(f"  净值终值={res.strategy_nav.iloc[-1]:.4f}  年化={a['年化收益']:.2%}  夏普={a['夏普']:.2f}  最大回撤={a['最大回撤']:.2%}")
+    print(f"  超额年化={e['超额年化']:.2%}  信息比率={e['信息比率']:.2f}  超额最大回撤={e['超额最大回撤']:.2%}")
+    print(f"  末日持仓={held} 只  成交={len(res.trades)} 笔  退市清算={len(res.missing_log)} 只  → {fig}")
 
 
 def main():
@@ -123,6 +172,14 @@ def main():
     pb.add_argument("--config", required=True, help="YAML 配置（引擎摩擦键 + benchmark/end_date）")
     pb.add_argument("--out", required=True, help="输出目录（仪表盘 + 单图）")
     pb.set_defaults(func=cmd_backtest)
+
+    pc = sub.add_parser("cash", help="现金回测：因子+票池+基准 → 逐日撮合现金账户回测")
+    pc.add_argument("--factor", required=True, help="因子宽表文件 .parquet/.csv（index=日期, columns=代码）")
+    pc.add_argument("--pool", default=None, help="票池：none/省略=全市场 | 指数代码(如 000852.SH) | bool 宽表文件")
+    pc.add_argument("--benchmark", required=True, help="基准指数代码（如 000852.SH）")
+    pc.add_argument("--config", default=None, help="YAML：initial_capital/n_holdings/fee_rate/turnover_cap/start_date/end_date")
+    pc.add_argument("--out", required=True, help="输出目录（简报 + CSV）")
+    pc.set_defaults(func=cmd_cash)
 
     args = parser.parse_args()
     args.func(args)

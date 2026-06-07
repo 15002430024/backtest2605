@@ -67,6 +67,49 @@ def load_price_df(codes, start, end, need_feasibility=False) -> pd.DataFrame:
     return px.sort_values(["code", "date"]).reset_index(drop=True)
 
 
+def _read_years(subdir, cols, codes, start, end) -> pd.DataFrame:
+    """逐年读 cache/<subdir>/{year}.parquet 指定列 → 拼接、转 date、按 [start,end] 过滤的长表。"""
+    code_set = None if codes is None else set(codes)
+    start, end = pd.Timestamp(start), pd.Timestamp(end)
+    frames = []
+    for year in range(start.year, end.year + 1):
+        f = CACHE_ROOT / subdir / f"{year}.parquet"
+        if not f.exists():
+            raise FileNotFoundError(f"{subdir} 缓存缺失：{f}（先跑 data/fetch_all.py 补齐缓存）")
+        d = pd.read_parquet(f, columns=cols)
+        if code_set is not None:
+            d = d[d["code"].isin(code_set)]
+        frames.append(d)
+    df = pd.concat(frames, ignore_index=True)
+    df["date"] = pd.to_datetime(df["date"])
+    return df[(df["date"] >= start) & (df["date"] <= end)]
+
+
+def load_daily_df(codes, start, end,
+                  fields=("vwap", "close", "adj_factor", "trade_status")) -> pd.DataFrame:
+    """逐年读日行情指定字段 → long [date, code, *fields]。
+
+    load_price_df 只给 adj_close；现金引擎要真实成交价(vwap)、真实收盘价(close)、复权因子、
+    停牌状态(trade_status)，故单列一个字段可选的读法。codes=None 取全市场。
+    """
+    df = _read_years("daily", ["code", "date", *fields], codes, start, end)
+    if df.empty:
+        raise ValueError(f"daily_df 为空：start={pd.Timestamp(start).date()} end={pd.Timestamp(end).date()} "
+                         f"codes={'全市场' if codes is None else len(set(codes))}")
+    dup = df.groupby(["date", "code"]).size()
+    if (dup > 1).any():
+        raise ValueError(f"daily_df 存在重复 (date,code)（缓存应已干净）：\n{dup[dup > 1].head(5)}")
+    return df.sort_values(["code", "date"]).reset_index(drop=True)
+
+
+def load_derivative_df(codes, start, end, fields=("limit_status",)) -> pd.DataFrame:
+    """逐年读衍生表指定字段 → long [date, code, *fields]（现金引擎判涨跌停用 limit_status：1涨停/-1跌停/0正常/NA）。"""
+    df = _read_years("derivative", ["code", "date", *fields], codes, start, end)
+    if df.empty:
+        raise ValueError(f"derivative_df 为空：start={pd.Timestamp(start).date()} end={pd.Timestamp(end).date()}")
+    return df.sort_values(["code", "date"]).reset_index(drop=True)
+
+
 def load_index_eod(index_code: str) -> pd.DataFrame:
     """读单个指数 EOD → [date, close]（基准净值用）。文件名点换下划线。"""
     path = CACHE_ROOT / "index_eod" / f"{index_code.replace('.', '_')}.parquet"

@@ -6,8 +6,8 @@
 
 公开入口：plot_factor_report(result, out_dir, weighting='equal') -> None
 
-图：① 十分组净值曲线 ② 多空/单独多/单独空 ③ 分组年化收益柱 ④ IC 时间序列+累计IC
-   ⑤ 多头超额曲线 ⑥ 滚动 IC/RankIC/ICIR（窗口=调仓期数）⑦ 滚动夏普/波动（窗口=252日）
+图：① 十分组净值曲线 ② 多空/单独多/单独空（叠加基准指数线）③ 分组年化收益柱 ④ IC 时间序列+累计IC
+   ⑤ 多头 vs 基准 净值（双线，间距=超额）⑥ 滚动 IC/RankIC/ICIR（窗口=调仓期数）⑦ 滚动夏普/波动（窗口=252日）
 CSV：十分组净值/超额净值（equal+factor 各一份）、IC 明细、IC 统计。
 
 滚动夏普/波动不手写——复用 analysis.build_report_data（同一份滚动公式，不留副本）。
@@ -48,6 +48,15 @@ def plot_factor_report(result: dict, out_dir, weighting: str = "equal") -> None:
     n_groups = gnav.shape[1]
     wname = "等权" if weighting == "equal" else "因子加权"
 
+    # 多头净值(nav_norm) + 基准按多头首日重锚(bench_norm)，② ⑤ ⑦ 三处共用，只算一次。
+    # 重锚口径复用 build_report_data（reindex+ffill+按首个有效点归一），不另写对齐逻辑。
+    bench_code = result["meta"]["benchmark"]
+    rd_long = build_report_data(
+        {"nav": result["long_only"][weighting].dropna()},
+        benchmark_nav=result["bench_nav"],
+    )
+    bench_norm = rd_long.bench_norm  # 基准重锚到 1.0，index 与多头(=图②"单独多")对齐
+
     # ① 十分组净值曲线
     fig, ax = plt.subplots(figsize=(10, 6))
     for g in range(1, n_groups + 1):
@@ -61,6 +70,7 @@ def plot_factor_report(result: dict, out_dir, weighting: str = "equal") -> None:
     ax.plot(result["long_short"][weighting].index, result["long_short"][weighting], label="多空(100/100)")
     ax.plot(result["long_only"][weighting].index, result["long_only"][weighting], label="单独多")
     ax.plot(result["short_only"][weighting].index, result["short_only"][weighting], label="单独空")
+    ax.plot(bench_norm.index, bench_norm.values, color="gray", ls="--", lw=1.3, label=f"基准({bench_code})")
     ax.set_title(f"多空 / 单独多 / 单独空 净值（{wname}）"); ax.set_xlabel("日期"); ax.set_ylabel("净值"); ax.legend()
     fig.tight_layout(); fig.savefig(out_dir / "多空净值.png", dpi=150); plt.close(fig)
 
@@ -81,13 +91,13 @@ def plot_factor_report(result: dict, out_dir, weighting: str = "equal") -> None:
     ax1.set_title(f"IC 时间序列（IC均值={ic['ic_mean']:.3f}, ICIR年化={ic['ic_ir_annual']:.2f}, t={ic['ic_t']:.2f}）")
     fig.tight_layout(); fig.savefig(out_dir / "IC时间序列.png", dpi=150); plt.close(fig)
 
-    # ⑤ 多头超额曲线（对外部基准）
-    ex = result["excess"][weighting]["多头"]
+    # ⑤ 多头 vs 基准 绝对净值（双线，间距=超额；超额明细仍在 超额净值_*.csv）
     fig, ax = plt.subplots(figsize=(10, 6))
-    ax.plot(ex.index, ex.values, label="多头超额")
-    ax.set_title(f"多头超额净值（{wname}，对 {result['meta']['benchmark']}）")
-    ax.set_xlabel("日期"); ax.set_ylabel("超额净值"); ax.legend()
-    fig.tight_layout(); fig.savefig(out_dir / "多头超额曲线.png", dpi=150); plt.close(fig)
+    ax.plot(rd_long.nav_norm.index, rd_long.nav_norm.values, label="多头")
+    ax.plot(bench_norm.index, bench_norm.values, color="gray", ls="--", lw=1.3, label=f"基准({bench_code})")
+    ax.set_title(f"多头 vs 基准 净值（{wname}，基准={bench_code}）")
+    ax.set_xlabel("日期"); ax.set_ylabel("净值"); ax.legend()
+    fig.tight_layout(); fig.savefig(out_dir / "多头与基准净值.png", dpi=150); plt.close(fig)
 
     # ⑥ 滚动 IC / RankIC / ICIR —— 窗口=调仓期数（非 252 天）。别拿 ic_cum 去 rolling。
     rb = result["meta"]["rebalance"]
@@ -108,8 +118,8 @@ def plot_factor_report(result: dict, out_dir, weighting: str = "equal") -> None:
     fig.tight_layout(); fig.savefig(out_dir / "滚动IC.png", dpi=150); plt.close(fig)
 
     # ⑦ 滚动夏普 / 滚动波动 —— 复用 build_report_data（窗口=252 日，日频 NAV）
-    curves = {"多空": result["long_short"][weighting], "多头": result["long_only"][weighting]}
-    rds = {name: build_report_data({"nav": nav.dropna()}) for name, nav in curves.items()}
+    # 多头直接复用上面的 rd_long（已含 rolling_sharpe/vol），不重复 build
+    rds = {"多空": build_report_data({"nav": result["long_short"][weighting].dropna()}), "多头": rd_long}
     fig, (axs, axv) = plt.subplots(1, 2, figsize=(14, 6))
     for name, rd in rds.items():
         axs.plot(rd.rolling_sharpe.index, rd.rolling_sharpe.values, label=name)

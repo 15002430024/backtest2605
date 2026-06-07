@@ -1,0 +1,9 @@
+# 现金引擎配置样例（bt cash --config 这个文件）
+# 用法：bt cash --factor alpha.parquet --pool 000852.SH --benchmark 000852.SH --config examples/cash_config.yaml --out out/
+
+initial_capital: 100000000   # 初始资金（1 亿）
+n_holdings: 200              # 目标持有只数（等权，每只 = 总资产/n_holdings）
+fee_rate: 0.0014            # 双边手续费 14bp，买卖各收一次
+turnover_cap: 0.30          # 单边换手硬上限，按 |Δ| 降序卡死；建仓日豁免
+start_date: null            # 建仓日：null=自动取首个 t-1 因子有值且当日 vwap 有值的交易日；或填 20200103
+end_date: null              # 回测截止：null=取因子宽表末日

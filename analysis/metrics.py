@@ -124,11 +124,16 @@ def calc_metrics(
     if benchmark_nav is not None and len(benchmark_nav) >= 2:
         s_ret, b_ret = _align_returns(nav.sort_index(), benchmark_nav.sort_index())
         if s_ret is not None:
+            # 逐日算术超额累乘口径（与 build_report_data、factor.compute_excess 统一）：
+            # 日超额 α=r_s−r_b，超额净值 ∏(1+α)，年化用复利、回撤直接对超额净值求
             excess = s_ret - b_ret
+            excess_nav = (1 + excess).cumprod()
+            n_ex = len(excess)
             te = excess.std() * np.sqrt(periods_per_year)
-            metrics["超额年化"] = excess.mean() * periods_per_year
+            metrics["超额年化"] = excess_nav.iloc[-1] ** (periods_per_year / n_ex) - 1 if n_ex else np.nan
+            metrics["超额最大回撤"] = (excess_nav / excess_nav.cummax() - 1).min()
             metrics["跟踪误差"] = te
-            metrics["信息比率"] = (excess.mean() * periods_per_year) / te if te > 0 else np.nan
+            metrics["信息比率"] = excess.mean() / excess.std() * np.sqrt(periods_per_year) if excess.std() > 0 else np.nan
             var_b = b_ret.var()
             metrics["Beta"] = s_ret.cov(b_ret) / var_b if var_b > 0 else np.nan
 
@@ -155,7 +160,7 @@ class ReportData:
       annual_bench    年度基准收益（index=年, 值=%）；无基准则 None
       rolling_sharpe 滚动夏普序列
       rolling_vol    滚动年化波动序列（%）
-      excess_cum     超额收益累计曲线（%，策略净值/基准净值−1 相对超额）；无基准则 None
+      excess_cum     超额收益累计曲线（%，逐日算术超额 α=r_s−r_b 累乘 ∏(1+α)−1）；无基准则 None
       turnover_dates / turnover_pct / cost_cum_bps  换手率柱(%) + 累计成本(bps)；无调仓则空
       blocked_counts 被拦交易按原因计数 Series；无则空 Series
       daily_ret_pct  日收益率序列（%，画分布直方图）
@@ -257,8 +262,8 @@ def build_report_data(
         annual_bench = ab.reindex(annual_strategy.index)
         s_ret, b_ret = _align_returns(nav, benchmark_nav.sort_index())
         if s_ret is not None:
-            # 相对超额：策略累计净值 / 基准累计净值 − 1
-            excess_cum = ((1 + s_ret).cumprod() / (1 + b_ret).cumprod() - 1) * 100
+            # 逐日算术超额累乘（α=r_s−r_b，∏(1+α)−1），与 calc_metrics 超额净值同口径
+            excess_cum = ((1 + (s_ret - b_ret)).cumprod() - 1) * 100
 
     # 持仓相关
     position_count = weights_top = None
