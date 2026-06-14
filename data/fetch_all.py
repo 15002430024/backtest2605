@@ -7,7 +7,8 @@
     3. fetch_derivative     — 衍生指标（涨跌停状态等）
     4. fetch_index_members  — 指数成分股
     5. fetch_index_eod      — 基准指数日行情
-    6. 交叉校验:
+    6. fetch_description    — 股票上市/退市日（现金引擎判退市用）
+    7. 交叉校验:
        a. validate_price_vs_calendar       — 日行情 date 列 ⊆ 日历
        b. validate_derivative_vs_calendar  — 衍生指标 date 列 ⊆ 日历
        c. validate_index_dates_vs_calendar — 指数成分股 entry_date/exit_date ⊆ 日历
@@ -29,6 +30,7 @@ import pandas as pd
 
 import fetch_calendar
 import fetch_derivative
+import fetch_description
 import fetch_index_eod
 import fetch_index_members
 import fetch_price_daily
@@ -137,12 +139,17 @@ def fetch_all(force: bool = False) -> None:
     fetch_index_members.fetch_and_save_all()
 
     print("\n" + "=" * 60)
-    print("Step 5/6: 基准指数日行情 (fetch_index_eod)")
+    print("Step 5/7: 基准指数日行情 (fetch_index_eod)")
     print("=" * 60)
     fetch_index_eod.fetch_and_save_all()
 
     print("\n" + "=" * 60)
-    print("Step 6/6: 交叉校验 (日历)")
+    print("Step 6/7: 股票上市/退市日 (fetch_description)")
+    print("=" * 60)
+    fetch_description.fetch_and_save()
+
+    print("\n" + "=" * 60)
+    print("Step 7/7: 交叉校验 (日历)")
     print("=" * 60)
     validate_price_vs_calendar()
     validate_derivative_vs_calendar()

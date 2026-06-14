@@ -1,9 +1,22 @@
 # 现金引擎配置样例（bt cash --config 这个文件）
-# 用法：bt cash --factor alpha.parquet --pool 000852.SH --benchmark 000852.SH --config examples/cash_config.yaml --out out/
+# 两种用法（--weights 与 --factor 二选一）：
+#   bt cash --weights w.parquet --benchmark 000852.SH --config examples/cash_config.yaml --out out/
+#   bt cash --factor alpha.parquet --pool 000852.SH --benchmark 000852.SH --config examples/cash_config.yaml --out out/
 
+# —— 执行层（两种用法都生效）——
 initial_capital: 100000000   # 初始资金（1 亿）
-n_holdings: 200              # 目标持有只数（等权，每只 = 总资产/n_holdings）
-fee_rate: 0.0014            # 双边手续费 14bp，买卖各收一次
-turnover_cap: 0.30          # 单边换手硬上限，按 |Δ| 降序卡死；建仓日豁免
-start_date: null            # 建仓日：null=自动取首个 t-1 因子有值且当日 vwap 有值的交易日；或填 20200103
-end_date: null              # 回测截止：null=取因子宽表末日
+buy_fee: 0.0003             # 买入费率 3bp（佣金，不含印花）；与权重引擎 buy_cost 对齐
+sell_fee: 0.0013            # 卖出费率 13bp（佣金+印花）；与权重引擎 sell_cost 对齐
+slippage: 0.0               # 单边滑点/冲击附加成本，买卖各叠加（0=只算佣金印花；体量大时再开）
+turnover_cap: null          # 单边换手硬上限；null=不卡（默认，对标权重引擎）；填 0.30 当流动性约束
+exec_price: vwap            # 成交价口径：vwap（默认，更真实）/ close（与权重引擎同口径做干净对标）/ open；估值恒用 close
+start_date: null            # 建仓日：null=自动取首个调仓日（当日成交价有值且有前一交易日）；或填 20200103
+end_date: null              # 回测截止：null=取 weights 末日
+
+# —— 策略层（仅 --factor 路径用；--weights 路径忽略）——
+# 因子 → weights_df：因子滞后一步（成交日前一交易日），无未来
+rebalance: M                # 调仓频率 M/W/D（换手主控）
+selection: [top_n, 50]      # 选股：[top_n, N] 取因子最高 N 只 / [top_group, n] 等分 n 组取顶组（顶分位 q → top_group round(1/q)）
+weighting: equal            # 权重：equal 等权 / factor 截面 rank 加权
+exclude_st: false           # 是否剔 ST（策略偏好；ST 本身可交易，执行层不拦）
+direction: 1                # +1 高因子看好 / -1 翻转

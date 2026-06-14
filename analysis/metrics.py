@@ -36,10 +36,24 @@ def _drawdown(nav: pd.Series) -> pd.Series:
 
 
 def _align_returns(nav: pd.Series, benchmark_nav: pd.Series):
-    """策略与基准按日期交集对齐，返回 (策略日收益, 基准日收益)；无足够交集返回 (None, None)。"""
+    """策略与基准按日期交集对齐，返回 (策略日收益, 基准日收益)；无足够交集返回 (None, None)。
+
+    基准在策略区间内若缺交易日（传入了周/月频或缺行基准），交集会变稀疏、pct_change 把跨多日
+    收益当 1 日 → 下游按 252 年化时超额年化/IR/跟踪误差/Beta 全部虚高，故缺日直接 fail-fast。
+    框架自身通路（calc_benchmark 返回每个交易日的指数 EOD）交集完整，不触发。
+    """
     common = nav.index.intersection(benchmark_nav.index)
     if len(common) < 2:
         return None, None
+    # 重叠区间内策略有、基准缺的交易日数：>0 即基准稀疏，跨日合并收益会被当 1 日年化
+    lo, hi = common.min(), common.max()
+    nav_in_range = nav.index[(nav.index >= lo) & (nav.index <= hi)]
+    missing = len(nav_in_range) - len(common)
+    if missing > 0:
+        raise ValueError(
+            f"基准在策略区间 [{lo.date()}, {hi.date()}] 内缺 {missing} 个交易日"
+            f"（策略 {len(nav_in_range)} 天、基准只覆盖 {len(common)} 天）；跨日合并收益会被当 1 日年化、"
+            f"超额指标失真。请传与策略同交易日历（每个交易日都有值）的基准。")
     s_ret = nav.loc[common].pct_change().dropna()
     b_ret = benchmark_nav.loc[common].pct_change().dropna()
     ci = s_ret.index.intersection(b_ret.index)
@@ -72,7 +86,7 @@ def calc_metrics(
     输入:
       nav            — pd.Series, index=交易日, value=NAV（起点任意）
       benchmark_nav  — pd.Series 或 None；给了则额外算 超额年化/信息比率/Beta/跟踪误差
-      trade_records  — list[dict] 或 None；给了则算 年均换手/调仓次数
+      trade_records  — list[dict] 或 None；给了则算 年均换手(双边)/调仓次数
       periods_per_year — 年化交易日数，默认 252
 
     输出: dict，字段见下方组装处。
@@ -93,7 +107,10 @@ def calc_metrics(
     drawdown = _drawdown(nav)
     max_dd = drawdown.min()
     trough_date = drawdown.idxmin()
-    peak_date = nav.loc[:trough_date].idxmax()
+    # 峰日取「谷之前最后一次触及该轮高点」的日期：净值二次触顶（未创新高）再大跌时，
+    # idxmax 会标到首次触顶日、把中间已收复段并进回撤区间，故取并列最大值的最后一次。
+    pre_trough = nav.loc[:trough_date]
+    peak_date = pre_trough[pre_trough == pre_trough.max()].index[-1]
     calmar = ann_return / abs(max_dd) if max_dd < 0 else np.inf
 
     win_rate = (ret > 0).mean()
@@ -116,9 +133,11 @@ def calc_metrics(
     }
 
     if trade_records:
+        # turnover 来自 run_backtest 的 Σ|Δw|=买+卖**双边**口径；年均换手即年化双边换手。
+        # 注意现金引擎 turnover_cap 是 cumsum/2 的**单边**口径，两者差 2 倍，对比时勿混。
         total_turnover = sum(r["turnover"] for r in trade_records)
         years = n_days / periods_per_year
-        metrics["年均换手"] = total_turnover / years if years > 0 else np.nan
+        metrics["年均换手(双边)"] = total_turnover / years if years > 0 else np.nan
         metrics["调仓次数"] = len(trade_records)
 
     if benchmark_nav is not None and len(benchmark_nav) >= 2:
@@ -131,7 +150,10 @@ def calc_metrics(
             n_ex = len(excess)
             te = excess.std() * np.sqrt(periods_per_year)
             metrics["超额年化"] = excess_nav.iloc[-1] ** (periods_per_year / n_ex) - 1 if n_ex else np.nan
-            metrics["超额最大回撤"] = (excess_nav / excess_nav.cummax() - 1).min()
+            # 回撤序列补 1.0 起点锚（excess_nav 首点已是 1+α₁，不含 1.0）：否则首段超额回撤从 1+α₁
+            # 而非 1.0 量起、低估≈|首日超额|（与 factor.compute_excess 的 fillna(0) 锚点口径统一）。
+            ex_anchored = np.concatenate([[1.0], excess_nav.values])
+            metrics["超额最大回撤"] = (ex_anchored / np.maximum.accumulate(ex_anchored) - 1).min()
             metrics["跟踪误差"] = te
             metrics["信息比率"] = excess.mean() / excess.std() * np.sqrt(periods_per_year) if excess.std() > 0 else np.nan
             var_b = b_ret.var()
@@ -256,8 +278,15 @@ def build_report_data(
                 f"build_report_data: 基准与策略日期无交集，"
                 f"基准 {benchmark_nav.index.min().date()}~{benchmark_nav.index.max().date()}，"
                 f"策略 {nav.index.min().date()}~{nav.index.max().date()}")
-        bench_norm = b / b.loc[anchor]  # 按首个有效基准点归一，避免整条 NaN
-        ab = _period_returns(benchmark_nav, _FREQ_YEAR_END) * 100
+        # 基准重锚到「策略在 anchor 日的净值水平」（而非恒 1.0）：基准首日晚于策略首日时，
+        # 两线在 anchor 相交、之后缺口=真实超额；否则净值对比图把策略前段涨幅画成伪超额。
+        # 常见情形（基准覆盖全程，anchor=策略首日）下 nav_norm.loc[anchor]=1.0，与原行为一致。
+        bench_norm = b / b.loc[anchor] * nav_norm.loc[anchor]
+        # 年度基准截断到策略区间再算（与 annual_strategy 同口径）：否则首年用基准整年 vs 策略半年，
+        # 基准比策略覆盖长时凭空显示策略跑输。
+        bench_in_range = benchmark_nav[(benchmark_nav.index >= nav.index.min()) &
+                                       (benchmark_nav.index <= nav.index.max())]
+        ab = _period_returns(bench_in_range, _FREQ_YEAR_END) * 100
         ab.index = ab.index.year
         annual_bench = ab.reindex(annual_strategy.index)
         s_ret, b_ret = _align_returns(nav, benchmark_nav.sort_index())

@@ -16,7 +16,7 @@
 统一行情（4 个交易日 d0~d3）:
   A: 10, 11, 12, 12   → 日收益 NaN, +0.10, +12/11-1, 0
   B: 20, 18, 18,  9   → 日收益 NaN, -0.10, 0,        -0.5
-运行: conda activate torch1010 && python test_backtest.py
+运行: conda activate torch1010 && python tests/test_backtest.py
 """
 
 import numpy as np
@@ -458,6 +458,74 @@ def test_weights_history():
 # ============================================================
 # 主运行
 # ============================================================
+# ============================================================
+# 本轮正确性修复新增用例（N1/N2/N3/N4/N11/N12）
+# ============================================================
+def _flat_price(codes, dates=DATES):
+    """价格全程不动的 price_df（隔离纯权重/阈值逻辑，无价格漂移干扰）。"""
+    rows = {"date": list(dates) * len(codes),
+            "code": sum([[c] * len(dates) for c in codes], []),
+            "adj_close": [10.0] * (len(dates) * len(codes))}
+    return pd.DataFrame(rows)
+
+
+def test_leverage_from_threshold_raises():
+    """N1：阈值跳过卖出+执行买入致生效权重 Σ|w|>1（负现金杠杆）→ raise，不静默按>100%敞口复利。"""
+    price = _flat_price(["A", "B", "C"])
+    # D0 建 {A:0.5,B:0.5}；D1 目标 {A:0.45,C:0.55}（两日输入均 Σ=1 合法）
+    # threshold=0.06 → A 变动 0.05<阈值保留旧 0.5、C 买 0.55 → Σ=1.05
+    w = _weights([(D0, "A", 0.5), (D0, "B", 0.5), (D1, "A", 0.45), (D1, "C", 0.55)])
+    _assert_raises(
+        lambda: run_backtest(w, price, config={"rebalance_threshold": 0.06}, end_date=D3),
+        "负现金杠杆", "N1 阈值杠杆泄漏",
+    )
+
+
+def test_threshold_invariant_weights_within_one():
+    """N12 不变量：threshold>0 正常路径下，每日生效权重 Σ|w| ≤ 1+eps（无杠杆泄漏）。"""
+    price = _flat_price(["A", "B", "C"])
+    # 良性调仓：D1 把 A 半仓换成 C 半仓（变动都≥阈值，不会跳过卖出）
+    w = _weights([(D0, "A", 0.5), (D0, "B", 0.5), (D1, "C", 0.5), (D1, "B", 0.5)])
+    res = run_backtest(w, price, config={"rebalance_threshold": 0.01}, end_date=D3)
+    rowsum = res["weights"].abs().sum(axis=1)
+    if (rowsum > 1.0 + 1e-9).any():
+        bad = rowsum[rowsum > 1.0 + 1e-9]
+        raise AssertionError(f"N12 不变量被破坏，存在 Σ|w|>1 的交易日：\n{bad}")
+
+
+def test_validation_nan_weight():
+    """N2：weights_df 的 weight 含 NaN → raise（不静默当不交易）。"""
+    _assert_raises(
+        lambda: run_backtest(_weights([(D0, "A", np.nan)]), PRICE_DF),
+        "NaN", "N2 NaN 权重",
+    )
+
+
+def test_validation_duplicate_row():
+    """N4：weights_df 重复 (date,code) → raise（校验按行求和、执行按 dict 去重，口径不一致会丢权重）。"""
+    _assert_raises(
+        lambda: run_backtest(_weights([(D0, "A", 0.5), (D0, "A", 0.5)]), PRICE_DF),
+        "重复", "N4 重复 (date,code)",
+    )
+
+
+def test_validation_unknown_config_key():
+    """N3：config 含未知键（如 buy_cost 拼成 buycost）→ raise，不静默回落零摩擦。"""
+    _assert_raises(
+        lambda: run_backtest(_weights([(D0, "A", 1.0)]), PRICE_DF, config={"buycost": 0.01}),
+        "未知键", "N3 未知 config 键",
+    )
+
+
+def test_update_weights_zero_divisor_raises():
+    """N11：long_short 两腿亏掉本金致漂移分母过零 → raise（替代裸 ZeroDivisionError / 符号翻转）。"""
+    # 多 A 空 B，cash=1；A 收益 -1（归零）、B 收益 +0.5 → total=0+(-1.5)+1=-0.5 ≤0
+    _assert_raises(
+        lambda: update_weights({"A": 1.0, "B": -1.0}, {"A": -1.0, "B": 0.5}),
+        "漂移无定义", "N11 漂移分母过零",
+    )
+
+
 def main():
     tests = [
         ("1 单股满仓", test_single_full),
@@ -479,6 +547,12 @@ def main():
         ("16 可行性过滤端到端", test_feasibility_through_engine),
         ("17 calc_benchmark", test_calc_benchmark),
         ("18 每日权重记录", test_weights_history),
+        ("19 N1 阈值杠杆 raise", test_leverage_from_threshold_raises),
+        ("20 N12 权重不变量", test_threshold_invariant_weights_within_one),
+        ("21 N2 NaN 权重 raise", test_validation_nan_weight),
+        ("22 N4 重复行 raise", test_validation_duplicate_row),
+        ("23 N3 未知 config 键 raise", test_validation_unknown_config_key),
+        ("24 N11 漂移过零 raise", test_update_weights_zero_divisor_raises),
     ]
     for name, fn in tests:
         fn()

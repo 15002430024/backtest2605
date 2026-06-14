@@ -30,6 +30,9 @@ def load_price_df(codes, start, end, need_feasibility=False) -> pd.DataFrame:
     """
     code_set = None if codes is None else set(codes)
     start, end = pd.Timestamp(start), pd.Timestamp(end)
+    if start > end:
+        raise ValueError(f"load_price_df: start({start.date()}) > end({end.date()})，区间为空"
+                         f"（codes={'全市场' if codes is None else len(code_set)}）")
     cols = ["code", "date", "adj_close"] + (["trade_status"] if need_feasibility else [])
     frames = []
     for year in range(start.year, end.year + 1):
@@ -44,7 +47,8 @@ def load_price_df(codes, start, end, need_feasibility=False) -> pd.DataFrame:
     px["date"] = pd.to_datetime(px["date"])
     px = px[(px["date"] >= start) & (px["date"] <= end)]
     if px.empty:
-        raise ValueError(f"price_df 为空：start={start.date()} end={end.date()} codes={len(code_set) if code_set else '全市场'}")
+        raise ValueError(f"price_df 为空：start={start.date()} end={end.date()} "
+                         f"codes={'全市场' if codes is None else len(code_set)}")
 
     if need_feasibility:
         deriv = []
@@ -71,6 +75,9 @@ def _read_years(subdir, cols, codes, start, end) -> pd.DataFrame:
     """逐年读 cache/<subdir>/{year}.parquet 指定列 → 拼接、转 date、按 [start,end] 过滤的长表。"""
     code_set = None if codes is None else set(codes)
     start, end = pd.Timestamp(start), pd.Timestamp(end)
+    if start > end:
+        raise ValueError(f"_read_years({subdir}): start({start.date()}) > end({end.date()})，区间为空"
+                         f"（codes={'全市场' if codes is None else len(code_set)}）")
     frames = []
     for year in range(start.year, end.year + 1):
         f = CACHE_ROOT / subdir / f"{year}.parquet"
@@ -144,3 +151,16 @@ def load_st_intervals() -> pd.DataFrame:
     for c in ("st_start", "st_end"):
         df[c] = pd.to_datetime(df[c])
     return df
+
+
+def load_delist_dates() -> pd.Series:
+    """读股票退市日 → Series(index=code, value=delist_date)。delist_date 为 NaT=未退市。
+
+    现金引擎判退市用（真实退市日，替代"窗口内最后有效成交日"的前视判定）。
+    """
+    path = CACHE_ROOT / "description" / "description.parquet"
+    if not path.exists():
+        raise FileNotFoundError(f"股票描述表缺失：{path}（先跑 data/fetch_description.py）")
+    df = pd.read_parquet(path, columns=["code", "delist_date"])
+    df["delist_date"] = pd.to_datetime(df["delist_date"])
+    return df.set_index("code")["delist_date"]

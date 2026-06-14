@@ -31,7 +31,15 @@ DEFAULT_CONFIG = {
 
 
 def _merge_config(config: dict) -> dict:
-    """config=None 或缺键时用 DEFAULT_CONFIG 补齐，返回完整配置（不改原 dict）。"""
+    """config=None 或缺键时用 DEFAULT_CONFIG 补齐，返回完整配置（不改原 dict）。
+
+    未知键直接 raise（堵 buy_cost 拼成 buycost 之类静默回落零摩擦：拼错的键不被消费、
+    实际跑的是默认零成本，回测无任何告警地 NAV 偏高）。
+    """
+    if config:
+        unknown = set(config) - set(DEFAULT_CONFIG)
+        if unknown:
+            raise ValueError(f"run_backtest config 含未知键 {sorted(unknown)}；合法键为 {sorted(DEFAULT_CONFIG)}")
     merged = dict(DEFAULT_CONFIG)
     if config:
         merged.update(config)
@@ -56,12 +64,14 @@ def calc_daily_returns(price_df: pd.DataFrame) -> pd.DataFrame:
 
     边界条件:
       - 每只股票的首个交易日 → daily_return = NaN，保留不处理
-      - adj_close 的质量问题（0、NaN）不在此函数处理，
-        应在阶段 1 数据校验中已排除
+      - adj_close 为 NaN 的行先丢弃（NaN 价 ≡ 当天无有效价，等同缺行）：避免 pct_change 默认
+        fill_method='pad' 把 NaN 价前向填充成"收益 0"、再把复牌日算成跨段全程收益。丢弃后这些
+        (date,code) 在下游 run_backtest 主循环走 no_row 分支记录，NAV 逐点不变（缺失那天仍按 0 推进）。
     """
     df = price_df[["date", "code", "adj_close"]].copy()
+    df = df.dropna(subset=["adj_close"])
     df = df.sort_values(["code", "date"])
-    df["daily_return"] = df.groupby("code")["adj_close"].pct_change()
+    df["daily_return"] = df.groupby("code")["adj_close"].pct_change(fill_method=None)
     return df[["date", "code", "daily_return"]]
 
 
@@ -102,6 +112,12 @@ def update_weights(old_weights: dict, daily_returns: dict) -> dict:
         new_values[code] = w * (1.0 + ret)
 
     total = sum(new_values.values()) + cash
+    # 组合当日价值归零/转负（long_short 极端亏损时分母可过零）→ 漂移无定义，fail-fast，
+    # 不让裸 ZeroDivisionError 或符号翻转的权重静默往下走。
+    if total <= 1e-12:
+        raise ValueError(
+            f"update_weights: 组合当日价值 total={total:.6e} ≤ 0，权重漂移无定义"
+            f"（long_short 两腿合计亏掉本金）；持仓 {len(old_weights)} 只、现金 {cash:.4f}")
     return {code: v / total for code, v in new_values.items()}
 
 
@@ -376,6 +392,18 @@ def run_backtest(
 
     config = _merge_config(config)
 
+    # 0. weights_df 结构检查：NaN 权重 / 重复 (date,code)（否则校验口径=按行求和、执行口径=dict
+    #    去重只留末行，两者不一致会静默丢权重 / 误判超限）
+    nan_w = weights_df[weights_df["weight"].isna()]
+    if len(nan_w):
+        r = nan_w.iloc[0]
+        raise ValueError(f"weights_df 的 weight 含 NaN，首个 {r['code']}@{pd.Timestamp(r['date']).date()}（共 {len(nan_w)} 处）")
+    dup = weights_df.duplicated(["date", "code"])
+    if dup.any():
+        r = weights_df[dup].iloc[0]
+        raise ValueError(f"weights_df 存在重复 (date,code)，首个 {r['code']}@{pd.Timestamp(r['date']).date()}"
+                         f"（共 {int(dup.sum())} 处）；校验按行求和、执行按 dict 去重，重复会静默丢权重")
+
     # 1. code 存在性检查
     weight_codes = set(weights_df["code"].unique())
     price_codes = set(price_df["code"].unique())
@@ -552,6 +580,17 @@ def run_backtest(
                 for b in blocked:
                     b["date"] = t
                     blocked_trades.append(b)
+            elif weight_mode == "long_only":
+                # 关过滤路径：skip_small_changes 逐票独立取舍，可能跳过卖出(保留较大旧权重)+执行买入
+                # → Σ|w|>1 = 负现金免息杠杆。fail-fast 暴露（开过滤时 check_tradable 容量分支已压回 1）。
+                # 仅 long_only 适用（long_short 合计绝对敞口本就≈2，不是杠杆）。
+                gross = sum(abs(w) for w in filtered.values())
+                if gross > 1.0 + 1e-9:
+                    top = sorted(filtered.items(), key=lambda kv: -abs(kv[1]))[:5]
+                    raise ValueError(
+                        f"调仓日 {pd.Timestamp(t).date()} 阈值过滤后 Σ|w|={gross:.6f} > 1（负现金杠杆）："
+                        f"skip_small_changes 跳过卖出+执行买入所致，rebalance_threshold="
+                        f"{config['rebalance_threshold']}；前5大持仓 {top}")
 
             trades = calc_trades(pre_trade_weights, filtered)
             cost = calc_cost(trades, config)

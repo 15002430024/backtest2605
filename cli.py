@@ -18,12 +18,20 @@ from pathlib import Path
 import pandas as pd
 import yaml
 
-from data.loaders import load_calendar, load_price_df, load_index_eod
-from engine.backtest import run_backtest, calc_benchmark
+from data.loaders import load_calendar, load_price_df, load_index_eod, CACHE_ROOT
+from engine.backtest import run_backtest, calc_benchmark, DEFAULT_CONFIG
 from engine.cash_engine import run_cash_backtest, BacktestConfig
-from factor.factor_test import run_factor_test
+from factor.factor_test import run_factor_test, factor_to_weights
 from factor.plot_factor import plot_factor_report
 from report.plot import plot_dashboard, plot_cash_report
+
+# cash 子命令 YAML 允许的键（白名单，拼错即 raise，不静默回落默认）：
+# 引擎 BacktestConfig 字段 + end_date 截断 + --factor 路径的 factor_to_weights 策略键
+_CASH_YAML_KEYS = {
+    "initial_capital", "buy_fee", "sell_fee", "slippage", "turnover_cap",
+    "exec_price", "start_date", "end_date",
+    "rebalance", "selection", "weighting", "exclude_st", "direction",
+}
 
 
 def _read_yaml(path) -> dict:
@@ -46,6 +54,14 @@ def _read_factor_wide(path) -> pd.DataFrame:
     if p.suffix == ".csv":
         return pd.read_csv(p, index_col=0, parse_dates=True)
     raise ValueError(f"因子文件格式不支持：{p.suffix}（仅 .parquet / .csv）：{p}")
+
+
+def _max_cached_daily_year_end() -> pd.Timestamp:
+    """已缓存日行情的最后年份的年末（用于把 end_date 钳进可读范围，避免 FileNotFoundError）。"""
+    years = [int(p.stem) for p in (CACHE_ROOT / "daily").glob("*.parquet") if p.stem.isdigit()]
+    if not years:
+        raise FileNotFoundError(f"日行情缓存为空：{CACHE_ROOT / 'daily'}（先跑 data/fetch_price_daily.py）")
+    return pd.Timestamp(f"{max(years)}-12-31")
 
 
 def _read_weights_long(path) -> pd.DataFrame:
@@ -83,7 +99,11 @@ def cmd_backtest(args):
     """权重回测：权重长表 + 配置 → load_price_df → run_backtest → plot_dashboard。"""
     weights_df = _read_weights_long(args.weights)
     raw = _read_yaml(args.config)
-    # 运行控制键 vs 引擎 config 键（其余原样透传 run_backtest）
+    # 运行控制键 vs 引擎 config 键（其余原样透传 run_backtest）；未知键 raise（堵 buy_cost 拼错静默零摩擦）
+    allowed = set(DEFAULT_CONFIG) | {"benchmark", "end_date"}
+    unknown = set(raw) - allowed
+    if unknown:
+        raise ValueError(f"backtest 配置含未知键 {sorted(unknown)}；合法键为 {sorted(allowed)}")
     benchmark = raw.get("benchmark")
     end_date = raw.get("end_date")
     bt_config = {k: v for k, v in raw.items() if k not in ("benchmark", "end_date")}
@@ -91,10 +111,13 @@ def cmd_backtest(args):
     codes = weights_df["code"].unique().tolist()
     start = pd.Timestamp(weights_df["date"].min())  # 回测从首个调仓日起，无需前置历史
     end_req = pd.Timestamp(end_date) if end_date else pd.Timestamp(weights_df["date"].max())
+    # end_req 超出已缓存年份会让 load_price_df 直接 FileNotFoundError；先钳到已缓存的最后年份，
+    # 让"end_date 写到未来跑到最新"的自然用法可用。
+    end_req = min(end_req, _max_cached_daily_year_end())
     need_feas = bool(bt_config.get("enable_feasibility_filter"))
 
     price_df = load_price_df(codes, start, end_req, need_feasibility=need_feas)
-    # end_req 落周末/超出已有数据 → 钳到有行情的最后一个交易日（与 factor 侧 _bt_end 同口径）
+    # 再钳到实际有行情的最后一个交易日（end_req 落周末/超出当年数据末端）
     end = min(end_req, pd.Timestamp(price_df["date"].max()))
     result = run_backtest(weights_df, price_df, config=bt_config, end_date=end)
 
@@ -113,28 +136,59 @@ def cmd_backtest(args):
 
 
 def _parse_pool(pool_arg):
-    """--pool 解析：none/省略 → None(全市场)；存在的文件 → 读 bool 宽表；否则当指数代码字符串。"""
+    """--pool 解析：none/省略 → None(全市场)；存在的文件 → 读 bool 宽表；否则当指数代码字符串。
+
+    若参数像文件路径（含 '/' 或 .parquet/.csv 后缀）但文件不存在 → raise"文件不存在"，
+    不再静默当指数代码透传（否则下游报"指数 …parquet 成分股未缓存"误导排查方向）。
+    """
     if pool_arg is None or str(pool_arg).lower() == "none":
         return None
     p = Path(pool_arg)
     if p.exists():
         return pd.read_parquet(p) if p.suffix == ".parquet" else pd.read_csv(p, index_col=0, parse_dates=True)
-    return pool_arg  # 指数代码（如 000852.SH），resolve_pool 内部校验/报错
+    looks_like_path = ("/" in str(pool_arg)) or p.suffix.lower() in (".parquet", ".csv")
+    if looks_like_path:
+        raise FileNotFoundError(f"--pool 票池文件不存在：{pool_arg}（要传指数代码请用纯代码如 000852.SH，不带路径/后缀）")
+    return pool_arg  # 指数代码（如 000852.SH），factor_to_weights 内部校验/报错
 
 
 def cmd_cash(args):
-    """现金回测：因子宽表 + 票池 + 基准 → run_cash_backtest → 现金简报 + CSV。"""
-    factor_wide = _read_factor_wide(args.factor)
+    """现金回测：weights_df（或 因子→factor_to_weights）+ 基准 → run_cash_backtest → 简报 + CSV。"""
+    if bool(args.weights) == bool(args.factor):
+        raise ValueError("bt cash 需且仅需 --weights 或 --factor 之一")
     raw = _read_yaml(args.config) if args.config else {}
+    unknown = set(raw) - _CASH_YAML_KEYS
+    if unknown:
+        raise ValueError(f"cash 配置含未知键 {sorted(unknown)}；合法键为 {sorted(_CASH_YAML_KEYS)}")
     cfg = BacktestConfig(
         initial_capital=raw.get("initial_capital", 1e8),
-        n_holdings=raw.get("n_holdings", 200),
-        fee_rate=raw.get("fee_rate", 0.0014),
-        turnover_cap=raw.get("turnover_cap", 0.30),
+        buy_fee=raw.get("buy_fee", 0.0003),
+        sell_fee=raw.get("sell_fee", 0.0013),
+        slippage=raw.get("slippage", 0.0),
+        turnover_cap=raw.get("turnover_cap", None),
+        exec_price=raw.get("exec_price", "vwap"),
         start_date=raw.get("start_date"),
     )
-    pool = _parse_pool(args.pool)
-    res = run_cash_backtest(factor_wide, pool, args.benchmark, config=cfg, end=raw.get("end_date"))
+    if args.weights:
+        weights_df = _read_weights_long(args.weights)
+        src = Path(args.weights).stem
+        cash_end = raw.get("end_date")                   # weights 路径：end 截断回测窗口
+    else:
+        sel = raw.get("selection", ["top_n", 200])       # YAML: [top_n, 200] / [top_group, 10]
+        weights_df = factor_to_weights(
+            _read_factor_wide(args.factor),
+            rebalance=raw.get("rebalance", "M"),
+            pool=_parse_pool(args.pool),
+            exclude_st=raw.get("exclude_st", False),
+            selection=(sel[0], sel[1]),
+            weighting=raw.get("weighting", "equal"),
+            direction=raw.get("direction", 1),
+            end=raw.get("end_date"),                      # end 已封顶因子窗口
+        )
+        src = Path(args.factor).stem
+        cash_end = None                                  # 让最后一个滞后成交日(信号日+1)自然执行
+
+    res = run_cash_backtest(weights_df, args.benchmark, config=cfg, end=cash_end)
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -146,14 +200,15 @@ def cmd_cash(args):
     res.trades.to_csv(out / "成交流水.csv", index=False)
     res.trade_log.to_csv(out / "买卖往返.csv", index=False)
     res.missing_log.to_csv(out / "退市清算.csv", index=False)
-    fig = plot_cash_report(res, args.out, title=f"现金回测（{Path(args.factor).stem}）")
+    res.blocked_log.to_csv(out / "成交受阻.csv", index=False)
+    fig = plot_cash_report(res, args.out, title=f"现金回测（{src}）")
 
     a, e = res.metrics_abs, res.metrics_excess
     held = int((res.holdings.iloc[-1] > 0).sum())
-    print(f"[cash] {Path(args.factor).name} | 票池={args.pool or '全市场'} 基准={args.benchmark}")
+    print(f"[cash] {src} | 来源={'weights' if args.weights else 'factor'} 基准={args.benchmark} exec={cfg.exec_price}")
     print(f"  净值终值={res.strategy_nav.iloc[-1]:.4f}  年化={a['年化收益']:.2%}  夏普={a['夏普']:.2f}  最大回撤={a['最大回撤']:.2%}")
     print(f"  超额年化={e['超额年化']:.2%}  信息比率={e['信息比率']:.2f}  超额最大回撤={e['超额最大回撤']:.2%}")
-    print(f"  末日持仓={held} 只  成交={len(res.trades)} 笔  退市清算={len(res.missing_log)} 只  → {fig}")
+    print(f"  末日持仓={held} 只  成交={len(res.trades)} 笔  退市清算={len(res.missing_log)} 只  受阻={len(res.blocked_log)} 次  → {fig}")
 
 
 def main():
@@ -173,11 +228,12 @@ def main():
     pb.add_argument("--out", required=True, help="输出目录（仪表盘 + 单图）")
     pb.set_defaults(func=cmd_backtest)
 
-    pc = sub.add_parser("cash", help="现金回测：因子+票池+基准 → 逐日撮合现金账户回测")
-    pc.add_argument("--factor", required=True, help="因子宽表文件 .parquet/.csv（index=日期, columns=代码）")
-    pc.add_argument("--pool", default=None, help="票池：none/省略=全市场 | 指数代码(如 000852.SH) | bool 宽表文件")
+    pc = sub.add_parser("cash", help="现金回测：weights_df 或 因子 → 调仓日驱动逐日撮合现金账户")
+    pc.add_argument("--weights", default=None, help="权重长表 .parquet/.csv（列=date,code,weight）；与 --factor 二选一")
+    pc.add_argument("--factor", default=None, help="因子宽表 .parquet/.csv；内部 factor_to_weights→权重；与 --weights 二选一")
+    pc.add_argument("--pool", default=None, help="(仅 --factor 用)票池：none/省略=全市场 | 指数代码 | bool 宽表文件")
     pc.add_argument("--benchmark", required=True, help="基准指数代码（如 000852.SH）")
-    pc.add_argument("--config", default=None, help="YAML：initial_capital/n_holdings/fee_rate/turnover_cap/start_date/end_date")
+    pc.add_argument("--config", default=None, help="YAML：initial_capital/fee_rate/slippage/turnover_cap/exec_price/start_date/end_date；--factor 另加 rebalance/selection/weighting/exclude_st/direction")
     pc.add_argument("--out", required=True, help="输出目录（简报 + CSV）")
     pc.set_defaults(func=cmd_cash)
 

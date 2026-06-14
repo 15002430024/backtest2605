@@ -2,7 +2,7 @@
 报告层验收测试
   指标正确性：构造已知 NAV，手算 总收益/最大回撤/起止/Calmar，断言一致
   出图落盘：跑真实引擎输出 → plot_dashboard，断言文件落盘、非空
-运行: conda activate torch1010 && python test_report.py
+运行: conda activate torch1010 && python tests/test_report.py
 """
 from pathlib import Path
 
@@ -74,6 +74,48 @@ def test_metrics_too_short():
     raise AssertionError("nav 1 点应 raise")
 
 
+# ---- 本轮指标层修复回归（M1/M3/M5/M6）----
+def test_max_dd_peak_is_round_local_high():
+    """M6：净值二次触顶再大跌，最大回撤起取本轮峰（末次触顶）而非首次触顶。"""
+    nav = pd.Series([1.0, 0.9, 1.0, 0.5],
+                    index=pd.to_datetime(["2023-01-03", "2023-01-04", "2023-01-05", "2023-01-06"]))
+    m = calc_metrics(nav)
+    _assert_close(m["最大回撤"], -0.5, "最大回撤幅度")
+    if m["最大回撤起"] != pd.Timestamp("2023-01-05"):
+        raise AssertionError(f"最大回撤起应为本轮峰 2023-01-05，实得 {m['最大回撤起'].date()}")
+
+
+def test_excess_dd_has_unit_anchor():
+    """M5：超额净值补 1.0 起点锚——首日超额 -5% 后走平，超额最大回撤应为 -5%（原报 0）。"""
+    idx = pd.date_range("2023-01-03", periods=11, freq="D")
+    s = pd.Series([1.0] + [0.95] * 10, index=idx)
+    b = pd.Series([1.0] * 11, index=idx)
+    m = calc_metrics(s, benchmark_nav=b)
+    _assert_close(m["超额最大回撤"], -0.05, "超额最大回撤")
+
+
+def test_align_returns_raises_on_sparse_benchmark():
+    """M1：基准在策略区间内缺交易日 → raise（跨日合并收益当 1 日年化会失真）。"""
+    idx = pd.bdate_range("2023-01-02", periods=60)
+    nav = pd.Series(np.linspace(1.0, 1.2, 60), index=idx)
+    bench_sparse = nav.iloc[::5]                       # 每 5 个交易日采样一次（稀疏）
+    try:
+        calc_metrics(nav, benchmark_nav=bench_sparse)
+    except ValueError:
+        return
+    raise AssertionError("稀疏基准应 raise")
+
+
+def test_annual_bench_truncated_to_strategy():
+    """M3：年度基准截断到策略区间——同源数据策略半年 vs 基准应同口径，不显示凭空跑输。"""
+    from analysis.metrics import build_report_data
+    cal = pd.bdate_range("2020-01-02", "2021-12-31")
+    bench = pd.Series(np.cumprod(1 + np.full(len(cal), 0.0005)), index=cal)
+    strat = bench[cal >= "2020-07-01"]                # 同源、策略年中起步
+    rd = build_report_data({"nav": strat}, benchmark_nav=bench)
+    _assert_close(rd.annual_bench[2020], rd.annual_strategy[2020], "年度基准首年(同源应等于策略)")
+
+
 # ============================================================
 # 测试 2: 出图落盘 —— 跑真实引擎 → plot_dashboard
 # ============================================================
@@ -135,6 +177,10 @@ def main():
         ("4 nav过短raise", test_metrics_too_short),
         ("5 仪表盘出图落盘", test_dashboard_outputs),
         ("6 缺基准不报错", test_dashboard_no_benchmark),
+        ("7 M6 回撤起取本轮峰", test_max_dd_peak_is_round_local_high),
+        ("8 M5 超额回撤补锚", test_excess_dd_has_unit_anchor),
+        ("9 M1 稀疏基准raise", test_align_returns_raises_on_sparse_benchmark),
+        ("10 M3 年度基准截断", test_annual_bench_truncated_to_strategy),
     ]
     for name, fn in tests:
         fn()

@@ -217,10 +217,10 @@ def _plot_metrics_table(ax, metrics):
         ("日胜率", f"{metrics['日胜率']*100:.1f}%"),
         ("盈亏比", f"{metrics['盈亏比']:.2f}" if not np.isnan(metrics['盈亏比']) else "—"),
     ]
-    for k in ("超额年化", "信息比率", "Beta", "年均换手"):
+    for k in ("超额年化", "信息比率", "Beta", "年均换手(双边)"):
         if k in metrics:
             v = metrics[k]
-            if k in ("超额年化", "年均换手"):
+            if k in ("超额年化", "年均换手(双边)"):
                 rows.append((k, f"{v*100:.1f}%"))
             else:
                 rows.append((k, f"{v:.2f}"))

@@ -1,5 +1,5 @@
 """
-因子测试模块验收（纯函数 + python 直跑，对齐 engine/test_backtest.py 风格）
+因子测试模块验收（纯函数 + python 直跑，对齐 tests/test_backtest.py 风格）
 
   python test_factor_test.py          # 合成数据，全 assert
   python test_factor_test.py --real    # 真实数据 sanity（动量因子，打印指标）
@@ -65,12 +65,28 @@ def test_ic_and_grouping():
     _assert(all(int(c[1:]) <= 4 for c in bot), f"第1组=最低因子(S00-04)，got {bot}")
 
 
+def test_ic_ppy_daily_list_matches_string():
+    """M2：逐日调仓用 list(交易日) 与字符串 'D' 的 ICIR 年化应一致（原 list 走 365 虚高 1.2 倍）。"""
+    print("[test_ic_ppy_daily_list_matches_string]")
+    # 用带噪因子/收益（IC 非常数）使 ICIR 有限可比；交易日序列（中位 gap=1）
+    cal = pd.bdate_range("2023-01-02", periods=40)
+    rng = np.random.RandomState(7)
+    cols = [f"S{i:02d}" for i in range(20)]
+    panel = pd.DataFrame(rng.randn(40, 20), index=cal, columns=cols)
+    fwd = pd.DataFrame(rng.randn(40, 20), index=cal, columns=cols)
+    mask = pd.DataFrame(True, index=cal, columns=cols)
+    ic_str = compute_ic(panel, fwd, mask, "D")["ic_ir_annual"]
+    ic_list = compute_ic(panel, fwd, mask, list(cal))["ic_ir_annual"]
+    _assert(np.isfinite(ic_str) and abs(ic_list - ic_str) < 1e-9,
+            f"逐日 list 与 'D' 的 ICIR 年化应一致，got list={ic_list:.4f} vs D={ic_str:.4f}")
+
+
 def test_decile_monotonic_and_long_short():
     print("[test_decile_monotonic_and_long_short]")
     codes, cal, price_df, factor = make_synthetic()
     rebalance_dates, panel, mask = _prep(price_df, factor, cal)
     labels = assign_groups(panel, mask, 10, +1)
-    bt_end = _bt_end(rebalance_dates, cal, cal[-1])
+    bt_end = _bt_end(cal, cal[-1])
     navs = backtest_groups(labels, panel, price_df, "equal", +1, bt_end, None)
     finals = [navs[g].iloc[-1] for g in range(1, 11)]
     _assert(all(finals[k] < finals[k + 1] for k in range(9)),
@@ -170,6 +186,7 @@ def test_missing_factor_in_specified_pool_reports():
 def run_synthetic():
     print("=" * 60, "\n合成数据验收\n" + "=" * 60)
     test_ic_and_grouping()
+    test_ic_ppy_daily_list_matches_string()
     test_decile_monotonic_and_long_short()
     test_weight_legality()
     test_avail_excludes_missing_price()

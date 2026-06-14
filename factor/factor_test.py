@@ -254,7 +254,11 @@ def compute_ic(factor_panel, forward_returns, mask, rebalance) -> dict:
         # （与字符串路径 W=52/M=12 对齐；用 252/日历gap 会混单位，周频得 36、月频得 8.4）
         gaps = np.diff(idx.values).astype("timedelta64[D]").astype(float)
         if len(gaps):
-            ppy = max(1.0, round(365.25 / np.median(gaps)))
+            median_gap = np.median(gaps)
+            # 相邻交易日（逐日调仓，中位日历 gap=1）按交易日年化=252，与字符串 'D' 同口径；
+            # 否则用 365.25/gap（W=365.25/7≈52、M=365.25/30≈12，与字符串分支对齐）。
+            # 逐日若按 365.25/gap 会得 365、与 'D' 的 252 差 sqrt(365/252)=1.2 倍。
+            ppy = 252.0 if median_gap <= 1.0 else max(1.0, round(365.25 / median_gap))
 
     def stats(s):
         mean, std = s.mean(), s.std(ddof=1)
@@ -343,7 +347,7 @@ def build_long_short_weights(group_labels, weighting, factor_panel, direction, n
 # ============================================================
 # 调引擎（每次先按 codes 过滤 price_df）
 # ============================================================
-def _bt_end(rebalance_dates, calendar, end_date) -> pd.Timestamp:
+def _bt_end(calendar, end_date) -> pd.Timestamp:
     """区间内 ≤ end_date 的最后一个交易日（强制显式传给引擎，避免只跑到末调仓日漏末段收益）。"""
     end_date = pd.Timestamp(end_date)
     days = calendar[calendar <= end_date]
@@ -413,6 +417,10 @@ def run_factor_test(factor_wide, config=None) -> dict:
     """
     cfg = dict(DEFAULT_FACTOR_CONFIG)
     if config:
+        unknown = set(config) - set(DEFAULT_FACTOR_CONFIG)
+        if unknown:
+            raise ValueError(f"run_factor_test config 含未知键 {sorted(unknown)}（拼错会静默回落默认）；"
+                             f"合法键为 {sorted(DEFAULT_FACTOR_CONFIG)}")
         cfg.update(config)
     if not cfg["benchmark"]:
         raise ValueError(f"benchmark 必填：需传外部指数代码（如 '000300.SH'），当前为 {cfg['benchmark']!r}；不再用池内等权兜底")
@@ -452,7 +460,7 @@ def run_factor_test(factor_wide, config=None) -> dict:
     # 分组
     group_labels = assign_groups(factor_panel, mask, cfg["n_groups"], cfg["direction"])
     n_groups = cfg["n_groups"]
-    bt_end = _bt_end(rebalance_dates, calendar, end)
+    bt_end = _bt_end(calendar, end)
 
     # 基准 = 外部指数（必填，入口已校验）
     bench_nav = calc_benchmark(load_index_eod(cfg["benchmark"]), start, bt_end)
@@ -495,3 +503,91 @@ def run_factor_test(factor_wide, config=None) -> dict:
         "long_only": long_only, "short_only": short_only, "bench_nav": bench_nav,
         "excess": excess, "metrics": metrics, "meta": meta,
     }
+
+
+# ============================================================
+# 因子 → weights_df（策略层公开入口：喂权重引擎/现金引擎对标用）
+# ============================================================
+def _select_group(factor_panel, mask, selection, direction) -> pd.DataFrame:
+    """选股 → group_labels（选中=组号，未选=NaN），供 build_group_weights 复用。
+
+    selection: ('top_n', N) 取因子最高 N 只（合成单组=1）；
+               ('top_group', n_groups) 等数量分 n_groups 组取顶组（=n_groups）。
+    顶分位 q = 用 ('top_group', round(1/q))。direction: +1 高因子看好 / -1 翻转。
+    """
+    mode, n = selection
+    if mode == "top_group":
+        return assign_groups(factor_panel, mask, n, direction)  # 顶组=n_groups，build 时取 max
+    if mode == "top_n":
+        score = (direction * factor_panel).where(mask)          # 高分=看好；不在池/缺因子→NaN
+        counts = score.notna().sum(axis=1)
+        bad = counts[counts < n]
+        if len(bad):
+            d0 = bad.index[0]
+            raise ValueError(f"factor_to_weights: 调仓日 {d0.date()} 有效股 {int(bad.iloc[0])} 只 < top_n={n}，无法选满")
+        r = score.rank(axis=1, ascending=False, method="first")  # 最优=1
+        selected = r <= n
+        return selected.astype(float).where(selected)            # 选中=1.0 / 否则 NaN（合成单组）
+    raise ValueError(f"非法 selection: {selection!r}（支持 ('top_n',N) | ('top_group',n_groups)）")
+
+
+def factor_to_weights(factor_wide, rebalance="M", pool=None, exclude_st=False,
+                      selection=("top_n", 200), weighting="equal", direction=1,
+                      start=None, end=None) -> pd.DataFrame:
+    """因子宽表 → 稀疏 weights_df [date, code, weight]（long_only，每调仓日 Σweight=1）。
+
+    只含策略约束（票池/因子非空/可选剔ST/排序选股/加权/调仓频率），**不含当日涨跌停/停牌**
+    （那归执行层）。产物可同时喂 run_backtest（权重引擎）与 run_cash_backtest（现金引擎）对标。
+
+    入参:
+      factor_wide: date×code 宽表。
+      rebalance: 'M'|'W'|'D'|list → make_rebalance_dates。
+      pool: None(全市场) / 指数代码 str / date×code bool 表（user 池）。
+      exclude_st: 是否剔 ST（策略偏好，默认不剔；非执行禁令）。
+      selection: ('top_n',N) | ('top_group',n_groups)（顶分位 q 用 top_group round(1/q)）。
+      weighting: 'equal' | 'factor'（'factor' 为截面 rank 归一加权，复用 build_group_weights）。
+      direction: +1 高因子看好 / -1 翻转。
+
+    无未来时点约定:
+      因子滞后一步——row 标的「成交日 D」用「D 的前一交易日」收盘因子算出。这样 D 当天用
+      close/vwap/open 任意 exec_price 成交都不偷看未来（vwap/open 在收盘前，用当日收盘因子=偷看）。
+    """
+    factor_wide = factor_wide.copy()
+    factor_wide.index = pd.to_datetime(factor_wide.index)
+    start = pd.Timestamp(start) if start is not None else factor_wide.index.min()
+    end = pd.Timestamp(end) if end is not None else factor_wide.index.max()
+
+    calendar = load_calendar()
+    signal_dates = make_rebalance_dates(calendar, start, end, rebalance)   # 因子观测日
+    # 成交日 = 信号日的下一交易日（无未来：D 收盘因子 → D+1 成交）
+    pos = calendar.get_indexer(signal_dates)
+    nxt = pos + 1
+    keep = nxt < len(calendar)
+    signal_dates = signal_dates[keep]
+    exec_dates = calendar[nxt[keep]]
+    if len(signal_dates) < 2:
+        raise ValueError(f"factor_to_weights: 有效调仓日不足 2（start={start.date()} end={end.date()} rebalance={rebalance}）")
+
+    price_df = load_price_df(list(factor_wide.columns), start, end)
+    factor_panel = build_factor_panel(factor_wide, price_df["code"].unique(), signal_dates)
+
+    if pool is None:
+        universe, members_df, user_mask = "all", None, None
+    elif isinstance(pool, str):
+        universe, members_df, user_mask = pool, load_index_members(pool), None
+    else:
+        universe, members_df, user_mask = "user", None, pool
+    st_intervals = load_st_intervals() if exclude_st else None
+    mask = build_universe_mask(
+        factor_panel, price_df, signal_dates, universe,
+        members_df=members_df, user_mask=user_mask,
+        exclude_st=exclude_st, st_intervals=st_intervals,
+    )
+
+    group_labels = _select_group(factor_panel, mask, selection, direction)
+    sel_group = int(group_labels.max().max())                  # top_n→1，top_group→n_groups（顶组）
+    weights = build_group_weights(group_labels, sel_group, +1, weighting, factor_panel, direction)
+
+    # 信号日 → 成交日 重标（无未来）
+    weights["date"] = weights["date"].map(dict(zip(signal_dates, exec_dates)))
+    return weights.sort_values(["date", "code"]).reset_index(drop=True)

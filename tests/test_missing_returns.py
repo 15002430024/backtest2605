@@ -6,7 +6,7 @@ price_df 没行 / adj_close 为 NaN」一律 `ret=0`、不报错（backtest.py:9
 本测试断言这一现状——不 raise、把缺失那天当 0 推进 NAV。等加了「无法解释的缺失要 raise」后，
 再在此补反向用例（无法解释→raise、停牌→放行 0）。
 
-运行: conda activate torch1010 && python engine/test_missing_returns.py
+运行: conda activate torch1010 && python tests/test_missing_returns.py
 """
 import numpy as np
 import pandas as pd
@@ -53,9 +53,14 @@ def test_missing_row_held_treated_as_zero():
             f"missing_log 记下 d1 B 缺行(no_row)，got {ml}")
 
 
-def test_nan_adjclose_held_no_raise():
-    """持仓票 adj_close=NaN → 不 raise、NaN 被当 0、NAV 全程有限（无法定价却不报错的症状）。"""
-    print("[test_nan_adjclose_held_no_raise]")
+def test_nan_adjclose_held_treated_as_missing_row():
+    """持仓票 adj_close=NaN → 等同缺行（no_row）：不 raise、当 0、NAV 不动、记 missing_log。
+
+    发现2 修复后：calc_daily_returns 先丢弃 NaN 价行（避免 pct_change pad 把 NaN 价当 0 收益、
+    复牌日算成跨段全程收益）。NaN 价的 (date,code) 在下游不再有行 → 走 no_row 分支（不是 nan_return）。
+    NAV 逐点不变（缺失那天仍按 0 推进）。
+    """
+    print("[test_nan_adjclose_held_treated_as_missing_row]")
     price_df = _price([
         ("2023-01-03", "A", 10.0), ("2023-01-04", "A", 11.0), ("2023-01-05", "A", 12.0),
         ("2023-01-03", "B", 20.0), ("2023-01-04", "B", np.nan), ("2023-01-05", "B", 22.0),
@@ -65,15 +70,17 @@ def test_nan_adjclose_held_no_raise():
     d = pd.to_datetime(["2023-01-03", "2023-01-04", "2023-01-05"])
     _assert(nav.notna().all(), "adj_close=NaN 未让 NAV 出现 NaN（被当 0，但已记进 missing_log）")
     _assert(abs(nav.loc[d[1]] - 1.0) < 1e-12, f"d1 NaN 价那天 NAV 不动（当 0），got {nav.loc[d[1]]:.6f}")
+    # d2 B 复牌：22/20-1=+0.10（NaN 价行被丢，pct_change 跨缺行不再 pad 成 0），NAV=1.10
+    _assert(abs(nav.loc[d[2]] - 1.10) < 1e-12, f"d2 B=22→NAV=1.10，got {nav.loc[d[2]]:.6f}")
     ml = res["missing_log"]
-    _assert(any(m["code"] == "B" and m["reason"] == "nan_return" and m["date"] == d[1] for m in ml),
-            f"missing_log 记下 d1 B 的 NaN 收益(nan_return)，got {ml}")
+    _assert(any(m["code"] == "B" and m["reason"] == "no_row" and m["date"] == d[1] for m in ml),
+            f"missing_log 记下 d1 B 缺价(no_row，NaN 价已等同缺行)，got {ml}")
 
 
 def run_all():
     print("=" * 60, "\n缺失/NaN 收益「当前行为」回归（钉死症状）\n" + "=" * 60)
     test_missing_row_held_treated_as_zero()
-    test_nan_adjclose_held_no_raise()
+    test_nan_adjclose_held_treated_as_missing_row()
     print("\n行为已钉死：缺行/NaN 价仍按 0 计、不 raise，但已记进 result['missing_log'] 暴露出来 ✅")
 
 
