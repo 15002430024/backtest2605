@@ -29,7 +29,12 @@ env/
 data/cache/
 *.png
 *.md
+*.parquet
+*.csv
 
 # 凭证 / 环境变量
 .env
 *.key
+*.log
+*.yaml
+analyze_deepfactor.py
