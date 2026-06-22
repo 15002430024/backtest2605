@@ -201,7 +201,9 @@ def skip_small_changes(old_weights: dict, target_weights: dict, threshold: float
     for code in codes:
         old_w = old_weights.get(code, 0.0)
         target_w = target_weights.get(code, 0.0)
-        chosen = target_w if abs(target_w - old_w) >= threshold else old_w
+        # 开仓豁免阈值：old_w==0 时强制取 target（阈值本意是省微调手续费，不该阻止建仓；
+        # 否则 threshold > 单票目标权重会让所有仓位永不建立、NAV 静默卡死 1.0）
+        chosen = target_w if (old_w == 0.0 or abs(target_w - old_w) >= threshold) else old_w
         if chosen != 0.0:
             result[code] = chosen
     return result
@@ -317,15 +319,19 @@ def check_tradable(old_weights: dict, target_weights: dict, day_data: dict):
         for code, b in pending_buys.items():
             final[code] = b["want"]
     else:
-        # 超额：按想买量等比例缩小到刚好放下
+        # 超额：按想买量等比例缩小到刚好放下。
+        # [修] 容量不足按"当天一次事件"聚合记一条(blocked_weight=当天总缩买额)，不再每只待买票
+        # 各记一条——后者会因满仓+高换手+1只锁仓就把笔数扇成几十条，严重夸大容量瓶颈。
         scale = remaining / want_total if want_total > 0 else 0.0
+        total_short = 0.0
         for code, b in pending_buys.items():
             actual_delta = b["delta"] * scale
             final[code] = b["old"] + actual_delta
-            short = b["delta"] - actual_delta  # 少买的部分
+            total_short += b["delta"] - actual_delta
+        if total_short > 1e-9:                      # 浮点/微小缩买不算被拦
             blocked.append({
-                "code": code, "reason": "容量不足",
-                "intended_action": "buy", "blocked_weight": short,
+                "code": f"<{len(pending_buys)}只>", "reason": "容量不足",
+                "intended_action": "buy", "blocked_weight": total_short,
             })
 
     final = {c: w for c, w in final.items() if w != 0.0}

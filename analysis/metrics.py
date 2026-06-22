@@ -134,7 +134,8 @@ def calc_metrics(
 
     if trade_records:
         # turnover 来自 run_backtest 的 Σ|Δw|=买+卖**双边**口径；年均换手即年化双边换手。
-        # 注意现金引擎 turnover_cap 是 cumsum/2 的**单边**口径，两者差 2 倍，对比时勿混。
+        # 注意现金引擎 turnover_cap 是**单边各自卡**口径（买边总额≤cap 且卖边总额≤cap，两边独立），
+        # 与此处双边 Σ|Δw| 口径不同，对比时勿混。
         total_turnover = sum(r["turnover"] for r in trade_records)
         years = n_days / periods_per_year
         metrics["年均换手(双边)"] = total_turnover / years if years > 0 else np.nan

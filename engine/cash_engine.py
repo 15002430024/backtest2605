@@ -98,7 +98,7 @@ class BacktestResult:
     metrics_abs: dict             # 绝对指标（calc_metrics 绝对部分）
     metrics_excess: dict          # 超额指标（calc_metrics 超额部分）
     missing_log: pd.DataFrame     # 退市清算留痕
-    blocked_log: pd.DataFrame     # 目标未达成留痕（涨跌停/停牌/整手不足/现金耗尽/换手限额）；观测性，不改 NAV
+    blocked_log: pd.DataFrame     # 目标未达成留痕（涨跌停/停牌/整手不足/现金耗尽/现金部分成交/换手限额）；观测性，不改 NAV
 
 
 # ===================== prep：从缓存装配市场底座 =====================
@@ -349,9 +349,17 @@ class CashBacktest:
         if cfg.turnover_cap is None or t == self._first_reb:
             admitted = delta.index                       # 不卡 / 建仓日豁免（锚到首个真实下单日）
         else:
+            # [修] 买/卖两边各自卡 turnover_cap（真·单边）。原 Σ|Δw|/2 在买卖不对称日（纯减仓/
+            # 纯加仓/被锁仓致一边为 0）会让活跃那边实际单边换手达上限 2 倍，约束失效。
+            # [修2] 准入必须按【各单自己这边】的累计判，不能用联合掩码 (cum_buy<=cap)&(cum_sell<=cap)：
+            # 联合掩码会让一边累计越过 cap 后、其后所有行(含另一边本在预算内的小单)被一并拒绝
+            # ——跨边毒杀，效果与"各自独立卡 cap"相反。买单只看 cum_buy、卖单只看 cum_sell。
             absd = delta.abs().sort_values(ascending=False, kind="mergesort")
-            cum_oneway = absd.cumsum() / 2.0             # 双边变动累加除 2 得单边换手
-            admitted = absd.index[cum_oneway <= cfg.turnover_cap + 1e-12]
+            is_buy = (delta.reindex(absd.index) > 0)
+            cum_buy = absd.where(is_buy, 0.0).cumsum()
+            cum_sell = absd.where(~is_buy, 0.0).cumsum()
+            cap = cfg.turnover_cap + 1e-12
+            admitted = absd.index[(is_buy & (cum_buy <= cap)) | (~is_buy & (cum_sell <= cap))]
             # 被换手限额截断的票（含本可装下的小单、清仓单）逐只留痕，不再静默落空
             for ticker in absd.index.difference(admitted):
                 self._record_blocked(t, ticker, "buy" if delta[ticker] > 0 else "sell",
@@ -426,6 +434,8 @@ class CashBacktest:
             if qty <= 0:
                 self._record_blocked(t, ticker, "buy", reason="现金耗尽")  # 想买但买不到（钱不够一手）
                 continue
+            if qty < want_lot:                           # 买到了但没买够（钱只够一部分）→ 留痕，观测性不改 NAV
+                self._record_blocked(t, ticker, "buy", reason="现金部分成交")
             self.cash -= qty * p * (1 + buy_cost)
             self._record_trade(t, ticker, "buy", p, qty, qty * p * buy_cost)
             self._seg_buy(ticker, qty, p, qty * p * buy_cost, t)

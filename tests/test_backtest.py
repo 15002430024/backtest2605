@@ -320,9 +320,12 @@ def test_check_tradable():
     _assert_close(final["A"], 0.5, "check 图2 A 锁仓")
     _assert_close(final["B"], 0.25, "check 图2 B 缩买")
     _assert_close(final["C"], 0.25, "check 图2 C 缩买")
+    # 容量不足按"当天一次事件"聚合记一条(不再每只缩买票各记一条)，加跌停 A 一条
     reasons = sorted(b["reason"] for b in blocked)
-    if reasons != ["容量不足", "容量不足", "跌停"]:
+    if reasons != ["容量不足", "跌停"]:
         raise AssertionError(f"check 图2 blocked 原因不对: {reasons}")
+    cap = [b for b in blocked if b["reason"] == "容量不足"][0]
+    _assert_close(cap["blocked_weight"], 0.30, "容量不足聚合缩买额 = B+C 各缩 0.15")
 
     # 涨停只拦买不拦卖
     f, b = check_tradable({"A": 0.3}, {"A": 0.5}, {"A": {"limit_status": 1, "trade_status": "交易"}})

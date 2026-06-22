@@ -30,6 +30,7 @@ DEFAULT_FACTOR_CONFIG = {
     "universe": "all",       # 'all' | 指数代码'000905.SH' | 'user'
     "user_mask": None,       # universe=='user' 时传 DataFrame(调仓日×code) bool
     "exclude_st": False,     # 可选剔 ST（默认关；开则自动读 st_intervals.parquet）
+    "exclude_bj": False,     # 可选剔北交所（代码后缀 .BJ；默认关。北交所流动性/数据波动大，常剔除）
     "direction": +1,         # +1 高因子看好 | -1 翻转
     "n_groups": 10,
     "benchmark": None,       # 超额对标的外部指数代码；必填，缺省 None 会在入口 raise（不再用池内等权兜底）
@@ -150,7 +151,7 @@ def _format_coverage_warning(coverage: dict) -> str:
 
 def build_universe_mask(factor_panel, price_df, rebalance_dates, universe,
                         members_df=None, user_mask=None, exclude_st=False, st_intervals=None,
-                        strict_missing_factor=False, return_coverage=False):
+                        exclude_bj=False, strict_missing_factor=False, return_coverage=False):
     """每个调仓日的可选股票池 = 在池内 & 当日有价格 [& 非ST]。
 
     默认口径：有效股票池 = 指定池/全市场 ∩ 有行情 ∩ 非 ST ∩ 有因子值。
@@ -162,6 +163,11 @@ def build_universe_mask(factor_panel, price_df, rebalance_dates, universe,
     avail = (price_df.pivot(index="date", columns="code", values="adj_close")
              .reindex(index=rebalance_dates).notna()
              .reindex(columns=codes).fillna(False))
+
+    if exclude_bj:                       # 剔北交所：.BJ 列恒不可选，对所有 universe 模式生效
+        bj_cols = [c for c in codes if str(c).endswith(".BJ")]
+        if bj_cols:
+            avail[bj_cols] = False
 
     if exclude_st:
         if st_intervals is None:
@@ -230,8 +236,16 @@ def _row_corr(a, b):
     ad = a.sub(a.mean(axis=1), axis=0)
     bd = b.sub(b.mean(axis=1), axis=0)
     num = (ad * bd).sum(axis=1)
-    den = np.sqrt((ad ** 2).sum(axis=1) * (bd ** 2).sum(axis=1))
-    return num / den.where(den > 0)
+    ssa = (ad ** 2).sum(axis=1)
+    ssb = (bd ** 2).sum(axis=1)
+    # [修] 用相对容差挡浮点零方差：某期截面全相等(如全涨停 +0.1)时 demean 残差是 ~1e-17 而非精确 0，
+    # 绝对阈值 den>0 挡不住 → 会把该期 IC 算成 0.0 污染 ic_mean/胜率/t。零方差期应判 NaN(无效)。
+    # 锚点必须远低于真实截面、又远高于浮点舍入地板：以原始 Σa² 为量纲基准时，门槛 1e-K·Σa²
+    # 代数上≈ CV²>1e-K(因 Σa²=N·mean²+ssa)。近常数行的舍入 ssa/Σa² ~ eps²~5e-32；真实截面 CV~O(1)。
+    # 取 1e-20(≈CV>1e-10)：比舍入地板高 ~12 个量级(只挡真零方差)，比任何真实低离散截面低 ~10 个量级
+    # (不误杀)。原 1e-12(≈CV>1e-6)锚点太松，会把相对离散度 <1ppm 的合法截面静默判 NaN，有偏污染 IC。
+    valid = (ssa > 1e-20 * (a ** 2).sum(axis=1)) & (ssb > 1e-20 * (b ** 2).sum(axis=1))
+    return (num / np.sqrt(ssa * ssb)).where(valid)
 
 
 def compute_ic(factor_panel, forward_returns, mask, rebalance) -> dict:
@@ -395,6 +409,18 @@ def compute_excess(strategy_nav, benchmark_nav) -> pd.Series:
     common = strategy_nav.index.intersection(benchmark_nav.index)
     if len(common) == 0:
         raise ValueError("策略与基准净值无共同交易日，无法算超额")
+    # 稀疏基准守卫：覆盖率按【策略全区间】衡量(len(common)/len(strategy))，不能只看"基准自身跨度内"
+    # ——否则基准提前截止(陈旧缓存未延伸到回测末日)会让跨度内 ratio=1.0 蒙混过关，策略尾段超额被
+    # 静默丢弃。本口径同时抓"基准提前/滞后截止"与"跨度内缺日"两类：基准缺策略交易日时 pct_change
+    # 会把跨缺口的多日收益当单日、或直接丢区间，静默把超额算错。<90% 即 fail-fast。
+    if len(common) / len(strategy_nav) < 0.9:
+        bmin, bmax = benchmark_nav.index.min(), benchmark_nav.index.max()
+        smin, smax = strategy_nav.index.min(), strategy_nav.index.max()
+        raise ValueError(
+            f"基准覆盖不足：策略 [{smin.date()},{smax.date()}] 共 {len(strategy_nav)} 个交易日，"
+            f"基准 [{bmin.date()},{bmax.date()}] 只覆盖其中 {len(common)} 个"
+            f"（{len(common)/len(strategy_nav):.0%}<90%）；pct_change 会把跨缺口的多日收益当单日、"
+            f"或丢失未覆盖区间，超额会算错——请补齐基准净值缓存(常见为指数 EOD 缓存未更新到回测末日)。")
     s = strategy_nav.reindex(common)
     b = benchmark_nav.reindex(common)
     diff = (s.pct_change() - b.pct_change()).fillna(0)
@@ -447,6 +473,7 @@ def run_factor_test(factor_wide, config=None) -> dict:
         factor_panel, price_df, rebalance_dates, cfg["universe"],
         members_df=members_df, user_mask=cfg["user_mask"],
         exclude_st=cfg["exclude_st"], st_intervals=st_intervals,
+        exclude_bj=cfg["exclude_bj"],
         strict_missing_factor=cfg["strict_missing_factor"], return_coverage=True,
     )
     coverage_warning = _format_coverage_warning(coverage)
@@ -490,6 +517,7 @@ def run_factor_test(factor_wide, config=None) -> dict:
     meta = {
         "rebalance": cfg["rebalance"], "universe": cfg["universe"], "n_groups": n_groups,
         "direction": cfg["direction"], "exclude_st": cfg["exclude_st"],
+        "exclude_bj": cfg["exclude_bj"],
         "benchmark": cfg["benchmark"],
         "config_分组与基准": friction,
         "config_多空与单独空": "理想态（引擎规定 long_short/负权重不可开可行性过滤）",
@@ -533,7 +561,7 @@ def _select_group(factor_panel, mask, selection, direction) -> pd.DataFrame:
 
 def factor_to_weights(factor_wide, rebalance="M", pool=None, exclude_st=False,
                       selection=("top_n", 200), weighting="equal", direction=1,
-                      start=None, end=None) -> pd.DataFrame:
+                      start=None, end=None, exclude_bj=False) -> pd.DataFrame:
     """因子宽表 → 稀疏 weights_df [date, code, weight]（long_only，每调仓日 Σweight=1）。
 
     只含策略约束（票池/因子非空/可选剔ST/排序选股/加权/调仓频率），**不含当日涨跌停/停牌**
@@ -581,7 +609,7 @@ def factor_to_weights(factor_wide, rebalance="M", pool=None, exclude_st=False,
     mask = build_universe_mask(
         factor_panel, price_df, signal_dates, universe,
         members_df=members_df, user_mask=user_mask,
-        exclude_st=exclude_st, st_intervals=st_intervals,
+        exclude_st=exclude_st, st_intervals=st_intervals, exclude_bj=exclude_bj,
     )
 
     group_labels = _select_group(factor_panel, mask, selection, direction)

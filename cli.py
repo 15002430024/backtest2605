@@ -30,7 +30,7 @@ from report.plot import plot_dashboard, plot_cash_report
 _CASH_YAML_KEYS = {
     "initial_capital", "buy_fee", "sell_fee", "slippage", "turnover_cap",
     "exec_price", "start_date", "end_date",
-    "rebalance", "selection", "weighting", "exclude_st", "direction",
+    "rebalance", "selection", "weighting", "exclude_st", "direction", "exclude_bj",
 }
 
 
@@ -183,6 +183,7 @@ def cmd_cash(args):
             selection=(sel[0], sel[1]),
             weighting=raw.get("weighting", "equal"),
             direction=raw.get("direction", 1),
+            exclude_bj=raw.get("exclude_bj", False),       # 剔北交所（.BJ）
             end=raw.get("end_date"),                      # end 已封顶因子窗口
         )
         src = Path(args.factor).stem

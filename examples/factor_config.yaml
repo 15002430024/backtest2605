@@ -11,3 +11,4 @@ exclude_st: false       # 是否剔 ST
 # bt_config:            # 可选：透传 run_backtest 的摩擦配置；缺省=理想态
 #   buy_cost: 0.0003
 #   sell_cost: 0.0013
+exclude_bj: false       # 剔北交所(.BJ);默认关
