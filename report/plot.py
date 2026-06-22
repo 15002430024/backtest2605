@@ -2,7 +2,8 @@
 报告层：机构研报风可视化（纯渲染，一行数据加工都不算）
 
 公开函数：
-  plot_dashboard — run_backtest 输出 → 一页仪表盘大拼图 + 关键单图（全中文）
+  plot_dashboard      — 权重引擎 run_backtest dict → 一页仪表盘大拼图 + 关键单图（全中文）
+  plot_cash_dashboard — 现金引擎 BacktestResult → 同款完整仪表盘（适配后复用同一套子图）
 
 所有"算"在 analysis/metrics.py 的 build_report_data 里完成；本文件子图只接
 ReportData 的已算好字段 + ax 渲染。风格：白底、深蓝主色、暖灰基准、细网格、
@@ -17,7 +18,7 @@ matplotlib.use("Agg")  # 无显示环境出图
 import matplotlib.pyplot as plt
 from matplotlib import gridspec
 
-from analysis.metrics import build_report_data
+from analysis.metrics import build_report_data, ReportData
 from analysis.plot_style import setup_chinese_font  # 跨平台中文字体，单一真相源
 
 # ── 配色（机构研报风）──
@@ -156,7 +157,10 @@ def _plot_blocked(ax, rd):
                 ha="center", va="center", fontsize=10, color="#888888"); ax.axis("off")
         ax.set_title("被拦交易分析", fontsize=11, fontweight="bold", color=C_STRATEGY)
         return
-    colors = {"涨停": C_UP, "跌停": C_DOWN, "停牌": "#7f8c8d", "无数据": "#bdc3c7", "容量不足": "#e67e22"}
+    colors = {"涨停": C_UP, "跌停": C_DOWN, "停牌": "#7f8c8d", "无数据": "#bdc3c7", "容量不足": "#e67e22",
+              # 现金引擎特有拦截原因
+              "换手限额": "#e67e22", "整手不足": "#8e44ad", "现金耗尽": "#16a085",
+              "现金部分成交": "#2980b9", "受限": "#95a5a6"}
     bar_colors = [colors.get(r, C_STRATEGY) for r in counts.index]
     ax.bar(counts.index, counts.values, color=bar_colors)
     ax.set_title("被拦交易（按原因计数）", fontsize=11, fontweight="bold", color=C_STRATEGY)
@@ -259,7 +263,7 @@ def plot_dashboard(result: dict, benchmark_nav: pd.Series = None,
                    save_dir: str = ".", title: str = "回测分析报告",
                    periods_per_year: int = 252, rolling_window: int = 252) -> str:
     """
-    一次性出仪表盘大拼图 + 关键单图，全部存 save_dir（中文文件名）。
+    run_backtest 输出 → 仪表盘大拼图 + 关键单图，全部存 save_dir（中文文件名）。
 
     输入:
       result        — run_backtest 输出 dict
@@ -268,10 +272,16 @@ def plot_dashboard(result: dict, benchmark_nav: pd.Series = None,
 
     输出: 仪表盘大图路径（str）。同时单独存 净值曲线/回撤曲线/月度收益热力图/超额收益.png
 
-    依赖: analysis.metrics.build_report_data（所有数据加工在那里做，本函数只渲染）
+    依赖: build_report_data 加工 → _render_dashboard 渲染（权重/现金两路引擎共用同一套子图）。
     """
-    _apply_style()
     rd = build_report_data(result, benchmark_nav, periods_per_year, rolling_window)
+    return _render_dashboard(rd, save_dir, title)
+
+
+def _render_dashboard(rd: ReportData, save_dir: str = ".", title: str = "回测分析报告",
+                      dashboard_name: str = "回测仪表盘.png") -> str:
+    """ReportData → 一页仪表盘大拼图（11 图 + KPI）+ 持仓分析图 + 关键单图，存 save_dir。返回大图路径。"""
+    _apply_style()
     metrics = rd.metrics
 
     save_path = Path(save_dir)
@@ -295,7 +305,7 @@ def plot_dashboard(result: dict, benchmark_nav: pd.Series = None,
     _plot_blocked(fig.add_subplot(gs[3, 1]), rd)
     _plot_return_dist(fig.add_subplot(gs[3, 2]), rd)
 
-    dashboard_path = save_path / "回测仪表盘.png"
+    dashboard_path = save_path / dashboard_name
     fig.savefig(dashboard_path, dpi=150, bbox_inches="tight", facecolor="white")
     plt.close(fig)
 
@@ -326,48 +336,47 @@ def _save_single(plot_fn, path, rd):
     plt.close(fig)
 
 
-def plot_cash_report(result, save_dir: str = ".", title: str = "现金回测报告") -> str:
-    """现金引擎 BacktestResult → 两栏图（左：策略vs基准净值；右：超额净值）+ 存盘。
+def plot_cash_dashboard(result, save_dir: str = ".", title: str = "现金回测仪表盘",
+                        periods_per_year: int = 252, rolling_window: int = 252) -> str:
+    """现金引擎 BacktestResult → 与权重引擎同款完整仪表盘（复用 build_report_data + 全部子图）。
 
-    现金引擎输出是 BacktestResult（dataclass，含 strategy_nav/benchmark_nav/excess_nav
-    和中文键的 metrics_abs/metrics_excess），与权重引擎的仪表盘口径不同（这里是股数账户、
-    带超额净值），故单独一张简报，不复用 plot_dashboard（那张吃权重）。
+    现金结果是 dataclass，先适配成 build_report_data 吃的 dict（nav/weights/trade_records/blocked_trades），
+    再修掉建仓日锚点在月/年表里制造的伪首期（_drop_pre_start_phantom），最后走 _render_dashboard。
+
+    换手口径注意：trade_records.turnover 是【实际双边换手】（受整手/涨跌停/现金截断后的真实成交），
+    与权重引擎仪表盘里那条「目标 Σ|Δw|」不同口径，现金侧通常更小。
+
+    输入: result — run_cash_backtest 返回的 BacktestResult；save_dir/title/年化天数/滚动窗。
+    输出: 现金回测仪表盘大图路径（str）。同时单独存 净值曲线/回撤曲线/月度收益热力图/超额收益.png。
     """
-    _apply_style()
-    save_path = Path(save_dir)
-    save_path.mkdir(parents=True, exist_ok=True)
-    a, e = result.metrics_abs, result.metrics_excess
+    rdict = {
+        "nav": result.strategy_nav,
+        "weights": result.weights,
+        "trade_records": result.trade_records,
+        "blocked_trades": result.blocked_log.to_dict("records"),   # build_report_data 只取每条的 reason
+    }
+    rd = build_report_data(rdict, benchmark_nav=result.benchmark_nav,
+                           periods_per_year=periods_per_year, rolling_window=rolling_window)
+    # nav.index[0]=建仓日前一天锚点，index[1]=首个真实交易日；据此抹掉锚点在周期表里的伪首期
+    _drop_pre_start_phantom(rd, result.strategy_nav.index[0], result.strategy_nav.index[1])
+    return _render_dashboard(rd, save_dir, title, dashboard_name="现金回测仪表盘.png")
 
-    fig, axes = plt.subplots(1, 2, figsize=(15, 5.6))
-    fig.suptitle(title, fontsize=13, fontweight="bold")
 
-    axes[0].plot(result.strategy_nav.index, result.strategy_nav.values,
-                 label="策略", color=C_STRATEGY, lw=1.4)
-    axes[0].plot(result.benchmark_nav.index, result.benchmark_nav.values,
-                 label="基准", color=C_BENCH, lw=1.4)
-    axes[0].set_title("策略 vs 基准净值（同起点 = 1）")
-    axes[0].set_ylabel("净值")
-    axes[0].legend(loc="upper left")
-    axes[0].text(0.98, 0.03,
-                 f"年化 {a['年化收益']:.1%}  夏普 {a['夏普']:.2f}\n"
-                 f"最大回撤 {a['最大回撤']:.1%}  年化波动 {a['年化波动']:.1%}",
-                 transform=axes[0].transAxes, va="bottom", ha="right", fontsize=9,
-                 bbox=dict(boxstyle="round", fc="white", alpha=0.7))
+def _drop_pre_start_phantom(rd: ReportData, anchor: pd.Timestamp, start: pd.Timestamp) -> None:
+    """删掉现金 nav 建仓日前一天锚点（=1.0）在月/年表里制造的伪 0% 上期格/柱（就地改 rd）。
 
-    axes[1].plot(result.excess_nav.index, result.excess_nav.values, color=C_UP, lw=1.4)
-    axes[1].axhline(1.0, color=C_GRID, lw=0.8, ls="--")
-    axes[1].set_title("超额净值（逐日算术超额累乘，起点 = 1）")
-    axes[1].set_ylabel("超额净值")
-    axes[1].text(0.02, 0.97,
-                 f"超额年化 {e['超额年化']:.1%}  信息比率 {e['信息比率']:.2f}\n"
-                 f"超额最大回撤 {e['超额最大回撤']:.1%}  跟踪误差 {e['跟踪误差']:.1%}",
-                 transform=axes[1].transAxes, va="top", fontsize=9,
-                 bbox=dict(boxstyle="round", fc="white", alpha=0.7))
-
-    for ax in axes:
-        _style_ax(ax)
-    fig.tight_layout(rect=[0, 0, 1, 0.95])
-    out = save_path / "现金回测简报.png"
-    fig.savefig(out, dpi=150, bbox_inches="tight", facecolor="white")
-    plt.close(fig)
-    return str(out)
+    锚点严格早于 start 且收益恒 0：当 start 是某月/年首个交易日时，锚点孤立落在上一月/年，
+    resample 会给它单开一个 bucket → 月度热力图凭空多一个 0% 月格、年度柱多一根 0% 年柱。
+    锚点本身不能删（它把建仓手续费折进首日收益、metrics 靠它），故只在周期表里抹掉锚点那一格。
+    锚点与 start 同月（常态）则不动。
+    """
+    if anchor.to_period("M") != start.to_period("M"):       # start 是月首交易日 → 锚点在上月
+        mt = rd.monthly_table
+        if anchor.year in mt.index and anchor.month in mt.columns:
+            mt.loc[anchor.year, anchor.month] = np.nan
+            if mt.loc[anchor.year].isna().all():            # 整年只有这个伪格 → 删年行（跨年情形）
+                rd.monthly_table = mt.drop(index=anchor.year)
+    if anchor.year != start.year:                           # start 是年首交易日 → 锚点在上年
+        rd.annual_strategy = rd.annual_strategy[rd.annual_strategy.index != anchor.year]
+        if rd.annual_bench is not None:
+            rd.annual_bench = rd.annual_bench[rd.annual_bench.index != anchor.year]

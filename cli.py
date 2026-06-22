@@ -23,7 +23,7 @@ from engine.backtest import run_backtest, calc_benchmark, DEFAULT_CONFIG
 from engine.cash_engine import run_cash_backtest, BacktestConfig
 from factor.factor_test import run_factor_test, factor_to_weights
 from factor.plot_factor import plot_factor_report
-from report.plot import plot_dashboard, plot_cash_report
+from report.plot import plot_dashboard, plot_cash_dashboard
 
 # cash 子命令 YAML 允许的键（白名单，拼错即 raise，不静默回落默认）：
 # 引擎 BacktestConfig 字段 + end_date 截断 + --factor 路径的 factor_to_weights 策略键
@@ -198,11 +198,12 @@ def cmd_cash(args):
     res.excess_nav.to_csv(out / "超额净值.csv")
     res.account.to_csv(out / "每日账户.csv")
     res.holdings.to_csv(out / "每日持仓股数.csv")
+    res.weights.to_csv(out / "每日权重.csv")
     res.trades.to_csv(out / "成交流水.csv", index=False)
     res.trade_log.to_csv(out / "买卖往返.csv", index=False)
     res.missing_log.to_csv(out / "退市清算.csv", index=False)
     res.blocked_log.to_csv(out / "成交受阻.csv", index=False)
-    fig = plot_cash_report(res, args.out, title=f"现金回测（{src}）")
+    fig = plot_cash_dashboard(res, args.out, title=f"现金回测仪表盘（{src}）")
 
     a, e = res.metrics_abs, res.metrics_excess
     held = int((res.holdings.iloc[-1] > 0).sum())

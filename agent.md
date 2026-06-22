@@ -6,7 +6,7 @@
 
 - **项目名称**: 端到端回测框架
 - **创建日期**: 2026-05-26
-- **最后更新**: 2026-06-22 (拉取上游 2 提交：`data/loaders.py` 加北交所复权价质量守卫 `validate_adjclose_quality`，现金引擎 `turnover_cap` 改真·单边 + 准入跨边毒杀修复 + 现金部分成交留痕，权重引擎 `skip_small_changes` 开仓豁免 + 容量不足留痕聚合，新增剔北交所开关 `exclude_bj` 与 `tests/test_stressfix.py`。详见变更日志 2026-06-22。此前 2026-06-14 **可读性重构** + 正确性审计两轮闭环修 34 条)
+- **最后更新**: 2026-06-22 (**现金回测接入完整仪表盘**：BacktestResult 加 weights/trade_records，复用 build_report_data + 全部子图出 `现金回测仪表盘.png`；plot_dashboard 拆 build/render 两路共用；对抗验证抓出并修锚点伪首期 bug；新增 test_cash_dashboard 6 测试，全套 87 passed + 真实数据对标过。同日另：拉取上游 2 提交——北交所复权守卫 `validate_adjclose_quality` + 换手/开仓/容量多处修复 + `exclude_bj`。详见变更日志 2026-06-22)
 - **⚠️ 新环境必跑一次**: `conda activate torch1010 && pip install -e .`（在 backtest 根目录），否则跨层导入 `from engine.backtest import` 等会 ModuleNotFoundError；装完即有 `bt` 命令
 - **命令行入口**: `bt factor --factor 因子.parquet --config cfg.yaml --out 目录` / `bt backtest --weights 权重.parquet --config cfg.yaml --out 目录` / `bt cash {--weights 权重.parquet | --factor 因子.parquet} --benchmark 指数代码 --config cfg.yaml --out 目录`（cash 二选一：--weights 直接吃权重做对标 / --factor 内部 factor_to_weights→权重；配置样例见 `examples/`）
 - **当前状态**: 阶段 2/3/4/5/6/7a 完成（权重引擎 + 现金引擎 + 指标 + 过滤 + 可视化）
@@ -412,6 +412,7 @@ analysis/
 | blocked_log（目标未达成留痕） | ✅ 完成 | 2026-06-08 | 涨停/跌停/停牌/无数据/整手不足/现金耗尽 合并记一表；观测性不改 NAV，是对标差异归因层。CLI 出 成交受阻.csv |
 | turnover_cap 默认关 | ✅ 完成 | 2026-06-08 | 默认 None（无每日重排无需减速阀，对标权重引擎）；非 None 才卡单边换手、建仓日豁免 |
 | 指标委托 + 超额 v3（沿用） | ✅ 完成 | 2026-06-07 | 绝对指标委托 analysis.calc_metrics；超额 plan v3 逐日算术累乘（未动） |
+| weights + trade_records 输出（仪表盘用） | ✅ 完成 | 2026-06-22 | BacktestResult 加 weights（每日生效后权重=持仓市值/总资产，归一 Σ≤1，给热力图/持仓数）+ trade_records（每调仓日 {date,turnover,cost}，turnover=**实际双边换手** (买+卖名义)/调仓前总资产，与权重引擎目标 Σ\|Δw\| 不同口径）。run() 顺手采集（_weights_now/_summarize_turnover），不新增遍历 |
 | engine/test_cash_engine.py | ✅ 完成 | 2026-06-08 | 18 用例：非调仓日不动仓/清仓/涨跌停·停牌拦截记blocked/退市vs停牌/复权守恒/换手卡帽开关/入口校验(负·NaN·Σ>1)/科创整手·吞没记账 |
 
 ### 模块: analysis/「算」层（被 report/factor 复用）
@@ -426,8 +427,9 @@ analysis/
 
 | 功能 | 状态 | 实现日期 | 说明 |
 |------|------|----------|------|
-| report/plot.py | ✅ 完成 | 2026-06-03 | plot_dashboard：机构研报风仪表盘 11 图+指标表 + 持仓分析 + 关键单图；**子图只吃 ReportData，一行加工都不算**（原 8 处加工已搬到 build_report_data）；全中文 |
-| report/test_report.py | ✅ 完成 | 2026-06-03 | 6 个测试：指标手算/单调/含基准/过短raise/出图落盘/缺基准不报错 |
+| report/plot.py · plot_dashboard | ✅ 完成 | 2026-06-03 | 机构研报风仪表盘 11 图+指标表 + 持仓分析 + 关键单图；**子图只吃 ReportData，一行加工都不算**（原 8 处加工已搬到 build_report_data）；全中文。**2026-06-22 拆出 `_render_dashboard(rd,…)` 只渲染，plot_dashboard=build+render（行为不变），两路引擎共用** |
+| report/plot.py · plot_cash_dashboard | ✅ 完成 | 2026-06-22 | 现金引擎 BacktestResult → 同款完整仪表盘：适配成 dict→build_report_data→`_drop_pre_start_phantom`(修建仓锚点伪首期)→`_render_dashboard`，出 现金回测仪表盘.png。**替代旧 plot_cash_report（已删）** |
+| report/test_report.py + test_cash_dashboard.py | ✅ 完成 | 2026-06-22 | report 6 测试（指标手算/单调/含基准/过短raise/出图落盘/缺基准不报错）+ 现金仪表盘 6 测试（C1 标量==引擎/C3 权重归一/C5 跨年·跨月·同月锚点/出图落盘） |
 
 ### 模块: factor/因子研究层（引擎上游）
 
@@ -441,6 +443,21 @@ analysis/
 ---
 
 ## 📜 变更日志
+
+### [2026-06-22] - 现金回测接入完整仪表盘（复用权重引擎那套 13 图，不另造）
+
+**起因:** 现金回测原来只有 `plot_cash_report` 两图简报（净值 + 超额），用户要和 `bt backtest` 同款机构研报仪表盘。核心是把现金引擎 `BacktestResult` 接到现有 `build_report_data` + 全部 `_plot_*` 子图这条装配线，零重复造图。动手前用对抗验证 workflow（6 个 skeptic 证伪口径映射）把错误杀在计划阶段，抓出 1 个真 bug（C5）+ 2 条口径修正。
+
+**改动:**
+- **engine/cash_engine.py · `BacktestResult` 加两字段**：`weights`（每日生效后权重 date×code = 持仓市值/总资产，含现金残余 Σ≤1）、`trade_records`（每调仓日 `{date, turnover, cost}`）。`run()` 在主循环顺手采集（`_weights_now` 在 `_mark_to_market` 后算权重；`_summarize_turnover` 把当日逐笔聚合成换手/成本），不新增遍历；`_assemble` 组装 weights 宽表对齐 account 日轴。
+- **turnover 口径（C2 修正）**：现金侧 `turnover=(买名义+卖名义)/调仓前总资产` 是**实际双边换手**（受整手/涨跌停/现金截断后的真实成交），与权重引擎那条「目标 Σ|Δw|」不同口径、通常更小。引擎里按 sizing 用的 `prev_total_asset` 归一（适配层拿不到首日 W=初始资金，故在引擎算）。
+- **report/plot.py · 拆 build/render**：从 `plot_dashboard` 抽出 `_render_dashboard(rd, save_dir, title, dashboard_name)` 只吃 ReportData；`plot_dashboard` = build + render（权重路径逐点不变）。新增 `plot_cash_dashboard(BacktestResult)`：适配成 dict → `build_report_data` → 修锚点伪首期 → `_render_dashboard`，出 `现金回测仪表盘.png`。
+- **锚点伪首期修复（C5，对抗验证抓到的真 bug）**：现金 nav 带「建仓日前一天=1.0」锚点，当首调仓日是某月/年首个交易日时，锚点孤立落上一月/年 → `resample` 给它单开 bucket → 月度热力图凭空多 0% 月格、年度柱多 0% 年柱。`_drop_pre_start_phantom` 只在周期表里抹掉锚点那一格（锚点本身不能删，它把建仓手续费折进首日收益、metrics 靠它）。
+- **C3 守住**：weights 必须 `shares×估值价/总资产` 归一再喂热力图——直接塞股数会被股价量级（1e2~1e6）撑爆色阶。引擎产出的就是归一权重。
+- **_plot_blocked 配色**补现金特有拦截原因（整手不足/现金耗尽/现金部分成交/换手限额/受限），否则挤默认色不可区分。
+- **cli.py · cmd_cash** 换 `plot_cash_report`→`plot_cash_dashboard`，多落 `每日权重.csv`。删除死代码 `plot_cash_report`。
+
+**验证（torch1010）:** 全套 **87 passed**（含新增 `tests/test_cash_dashboard.py` 6 用例：C1 仪表盘标量==引擎 metrics_abs/excess、C3 权重归一非股数、C5 跨年/跨月/同月三态、出图落盘）。**真实数据对标**（10 大盘股 × 2023 月频、基准 000001.SH）：C1 真实数据上标量逐点一致；首调仓日 2023-01-03=年首交易日正好命中 C5，年度柱只画 2023 无伪 2022 柱；权重热力图 10 只 ~0.09 等权色阶正常未撑爆；13 面板全渲染、大图 538 KB。滚动夏普/波动两格空属正常（回测 222 天 < 默认滚动窗 252 天，与权重引擎同款行为）。
 
 ### [2026-06-22] - 拉取上游 2 提交：北交所复权价质量守卫 + 换手/开仓/容量多处正确性修复
 

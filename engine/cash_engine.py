@@ -99,6 +99,8 @@ class BacktestResult:
     metrics_excess: dict          # 超额指标（calc_metrics 超额部分）
     missing_log: pd.DataFrame     # 退市清算留痕
     blocked_log: pd.DataFrame     # 目标未达成留痕（涨跌停/停牌/整手不足/现金耗尽/现金部分成交/换手限额）；观测性，不改 NAV
+    weights: pd.DataFrame         # 每日生效后权重 date×code = 持仓市值/总资产（含现金残余 → Σ每行≤1）；仪表盘持仓数/权重热力图用
+    trade_records: list           # 每调仓日一条 {date, turnover, cost}；turnover=实际双边换手=(买名义+卖名义)/调仓前总资产，cost=手续费/总资产
 
 
 # ===================== prep：从缓存装配市场底座 =====================
@@ -230,7 +232,8 @@ class CashBacktest:
 
         self.trades_rows, self.trade_log_rows = [], []
         self.missing_rows, self.blocked_rows = [], []
-        holdings_rows, account_rows = {}, {}
+        holdings_rows, account_rows, weights_rows = {}, {}, {}
+        trade_records = []                               # 每调仓日 {date, turnover, cost}
 
         start_i = self.dates.index(self.start_date)
         for i in range(start_i, len(self.dates)):
@@ -240,13 +243,17 @@ class CashBacktest:
             if t in self.rebalance_set:                  # 调仓日：取目标 → 撮合
                 target_w = self.target_panel.loc[t]
                 can_buy, can_sell = self._mark_tradable(t)
+                W = self.prev_total_asset                # 调仓前总资产 = _alloc_turnover 内 sizing 用的 W，换手按同口径归一
+                n0 = len(self.trades_rows)
                 target_shares = self._alloc_turnover(t, target_w, can_buy, can_sell)
                 self._execute(t, target_shares, can_buy, can_sell)
+                trade_records.append(self._summarize_turnover(t, self.trades_rows[n0:], W))
             # 非调仓日：不选股不下单，只随收盘价漂移（股数不动，市值变）
             total = self._mark_to_market(t)
             holdings_rows[t] = self.shares.copy()
             account_rows[t] = {"cash": self.cash,
                                "stock_value": total - self.cash, "total": total}
+            weights_rows[t] = self._weights_now(total)   # 生效后权重 = 持仓市值/总资产（_mark_to_market 已刷新 last_valid_price）
             self.prev_total_asset = total
 
         # 期末把还在手的持仓补一条 trade_log，不动账户（净值由收盘估值给出）
@@ -254,7 +261,7 @@ class CashBacktest:
         for ticker in list(self.shares.index):
             self._close_trade_log(ticker, last_t, self.last_valid_price.get(ticker, np.nan),
                                   extra_shares=self.shares[ticker], close_type="eom")
-        return self._assemble(holdings_rows, account_rows)
+        return self._assemble(holdings_rows, account_rows, weights_rows, trade_records)
 
     # ---------- ① 复权调整 ----------
     def _adjust_for_splits(self, t, t_prev):
@@ -459,6 +466,23 @@ class CashBacktest:
             mv = float((self.shares * px).sum())
         return self.cash + mv
 
+    # ---------- 仪表盘采集辅助（逐日权重 + 每调仓日换手）----------
+    def _weights_now(self, total: float) -> pd.Series:
+        """当前持仓的生效后权重 = 持仓市值/总资产（含现金残余 → Σ≤1）；空仓返回空 Series。
+        在 _mark_to_market 之后调用，last_valid_price 已刷新且持仓票估值价无 NaN（否则 _mark_to_market 已 raise）。"""
+        if self.shares.empty:
+            return pd.Series(dtype=float)
+        return (self.shares * self.last_valid_price.reindex(self.shares.index)) / total
+
+    @staticmethod
+    def _summarize_turnover(t, fills: list, W: float) -> dict:
+        """本调仓日逐笔成交 → 一条换手/成本记录（仪表盘换手成本图 + 年均换手指标用）。
+        turnover=实际双边换手=(买名义+卖名义)/W；cost=手续费合计/W；W=调仓前总资产。全被拦时两者为 0。"""
+        buy_notional = sum(r["price"] * r["shares"] for r in fills if r["side"] == "buy")
+        sell_notional = sum(r["price"] * r["shares"] for r in fills if r["side"] == "sell")
+        fee_total = sum(r["fee"] for r in fills)
+        return {"date": t, "turnover": (buy_notional + sell_notional) / W, "cost": fee_total / W}
+
     # ---------- 段级记账辅助 ----------
     def _seg_buy(self, ticker, qty, price, fee, t):
         s = self.seg.get(ticker)
@@ -527,13 +551,17 @@ class CashBacktest:
         del self.seg[ticker]
 
     # ---------- 装配结果与指标 ----------
-    def _assemble(self, holdings_rows, account_rows) -> BacktestResult:
+    def _assemble(self, holdings_rows, account_rows, weights_rows, trade_records) -> BacktestResult:
         cap = self.cfg.initial_capital
         account = pd.DataFrame.from_dict(account_rows, orient="index")
         account.index.name = "date"
         holdings = pd.DataFrame.from_dict(holdings_rows, orient="index")
         holdings = holdings.reindex(index=account.index).fillna(0.0)   # 空仓日补 0，对齐日历
         holdings.index.name = "date"
+        # 逐日权重 date×全市场代码，缺位（未持有/空仓日）补 0，对齐 account 日轴
+        weights = pd.DataFrame.from_dict(weights_rows, orient="index")
+        weights = weights.reindex(index=account.index, columns=self.m.trade_price.columns).fillna(0.0)
+        weights.index.name = "date"
 
         # 建仓日前一天放净值=1 锚点，让建仓手续费落进首日收益
         anchor = self.dates[self.dates.index(self.start_date) - 1]
@@ -564,7 +592,8 @@ class CashBacktest:
         blocked_log = pd.DataFrame(self.blocked_rows,
                                    columns=["date", "code", "side", "reason"])
         return BacktestResult(nav, excess_nav, bench_nav, holdings, account, trade_log,
-                              trades, metrics_abs, metrics_excess, missing_log, blocked_log)
+                              trades, metrics_abs, metrics_excess, missing_log, blocked_log,
+                              weights, trade_records)
 
     @staticmethod
     def _excess_nav(strategy_nav: pd.Series, benchmark_nav: pd.Series) -> pd.Series:
