@@ -65,6 +65,31 @@ def test_ic_and_grouping():
     _assert(all(int(c[1:]) <= 4 for c in bot), f"第1组=最低因子(S00-04)，got {bot}")
 
 
+def test_compute_factor_ic_uses_signal_dates(monkeypatch):
+    """compute_factor_ic 复用底层 piece、走信号日(make_rebalance_dates)、全票池 → 与手拼 IC 逐点一致。
+
+    钉死本任务头号坑：IC 必须在信号日(因子有值)算，不是成交日(信号日+1，因子多为空→IC 全 NaN)。
+    monkeypatch 喂合成 price/calendar，不依赖缓存。
+    """
+    import factor.factor_test as ft
+    codes, cal, price_df, factor = make_synthetic()
+    monkeypatch.setattr(ft, "load_calendar", lambda: cal)
+    monkeypatch.setattr(ft, "load_price_df", lambda cols, start, end, **kw: price_df)
+
+    rebalance_dates, panel, mask = _prep(price_df, factor, cal)            # 手拼：信号日=全日历(日频)
+    ref = compute_ic(panel, compute_forward_returns(price_df, rebalance_dates, cal), mask, "D")
+    got = ft.compute_factor_ic(factor, rebalance="D", pool=None)
+
+    _assert(got["ic_series"].index.equals(rebalance_dates[:-1]),
+            "IC index=信号日(末期无未来收益已丢)，非成交日")
+    # 逐点一致（equal_nan：单调合成因子每期 IC 恒=1→std=0→ir/ir_annual 为 NaN，属退化非错）
+    _assert(np.allclose(got["ic_series"].values, ref["ic_series"].values, equal_nan=True)
+            and np.isclose(got["ic_mean"], ref["ic_mean"]),
+            f"compute_factor_ic 与手拼 IC 逐点一致 (ic_mean {got['ic_mean']:.4f}=={ref['ic_mean']:.4f})")
+    _assert(got["ic_mean"] > 0.99,
+            f"单调因子在信号日 IC≈+1（若误用成交日因子全 NaN→ic_mean=NaN 此处会挂），got {got['ic_mean']:.4f}")
+
+
 def test_ic_ppy_daily_list_matches_string():
     """M2：逐日调仓用 list(交易日) 与字符串 'D' 的 ICIR 年化应一致（原 list 走 365 虚高 1.2 倍）。"""
     print("[test_ic_ppy_daily_list_matches_string]")

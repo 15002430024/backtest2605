@@ -220,6 +220,27 @@ def build_universe_mask(factor_panel, price_df, rebalance_dates, universe,
     return effective_pool
 
 
+def _build_pool_mask(factor_panel, price_df, dates, pool, exclude_st, exclude_bj) -> pd.DataFrame:
+    """pool(None/指数代码/user 表) → 解析 universe/members/user_mask → build_universe_mask 出有效票池。
+
+    factor_to_weights 与 compute_factor_ic 共用：同一份 pool 语义产同一个票池掩码，不留两份副本。
+    pool: None=全市场 / str=指数代码 / DataFrame(date×code bool)=user 池。
+    返回: effective_pool bool 面板 (dates × factor_panel.columns)。
+    """
+    if pool is None:
+        universe, members_df, user_mask = "all", None, None
+    elif isinstance(pool, str):
+        universe, members_df, user_mask = pool, load_index_members(pool), None
+    else:
+        universe, members_df, user_mask = "user", None, pool
+    st_intervals = load_st_intervals() if exclude_st else None
+    return build_universe_mask(
+        factor_panel, price_df, dates, universe,
+        members_df=members_df, user_mask=user_mask,
+        exclude_st=exclude_st, st_intervals=st_intervals, exclude_bj=exclude_bj,
+    )
+
+
 # ============================================================
 # IC
 # ============================================================
@@ -291,6 +312,35 @@ def compute_ic(factor_panel, forward_returns, mask, rebalance) -> dict:
         "rankic_mean": rk_mean, "rankic_ir": rk_ir, "rankic_t": rk_t,
         "ic_cum": ic.fillna(0).cumsum(),
     }
+
+
+def compute_factor_ic(factor_wide, rebalance="M", pool=None, exclude_st=False,
+                      exclude_bj=False, start=None, end=None) -> dict:
+    """因子宽表 → IC 统计 dict（复用 compute_ic，不另造 IC 算法）。
+
+    口径：信号日（读因子的调仓日，非 factor_to_weights 的成交日+1）、全票池（选股前）、
+    按调仓期前向收益（T→下一调仓日，compute_forward_returns 沿日历对齐再 shift，绝不裸 shift）。
+    与 factor_to_weights 同 rebalance/pool/exclude_st/exclude_bj/start/end → IC 与实际执行票池/区间对齐。
+    不入参 selection/weighting/direction：IC 在全票池上算、与选股/加权/方向无关。
+
+    入参:
+      factor_wide: date×code 宽表（值=因子值）。
+      rebalance/pool/exclude_st/exclude_bj/start/end: 同 factor_to_weights 同义同默认。
+    返回: compute_ic 的 dict（ic_series/ic_cum/ic_mean/ic_ir/ic_ir_annual/ic_t/ic_winrate/rankic_*）。
+    边界: 调仓日<2 → make_rebalance_dates raise；全期 IC 全 NaN → compute_ic 打 warning。
+    """
+    factor_wide = factor_wide.copy()
+    factor_wide.index = pd.to_datetime(factor_wide.index)
+    start = pd.Timestamp(start) if start is not None else factor_wide.index.min()
+    end = pd.Timestamp(end) if end is not None else factor_wide.index.max()
+
+    calendar = load_calendar()
+    rebalance_dates = make_rebalance_dates(calendar, start, end, rebalance)   # 信号日，不做成交日+1 位移
+    price_df = load_price_df(list(factor_wide.columns), start, end)
+    factor_panel = build_factor_panel(factor_wide, price_df["code"].unique(), rebalance_dates)
+    mask = _build_pool_mask(factor_panel, price_df, rebalance_dates, pool, exclude_st, exclude_bj)
+    fwd = compute_forward_returns(price_df, rebalance_dates, calendar)
+    return compute_ic(factor_panel, fwd, mask, rebalance)
 
 
 # ============================================================
@@ -599,18 +649,7 @@ def factor_to_weights(factor_wide, rebalance="M", pool=None, exclude_st=False,
     price_df = load_price_df(list(factor_wide.columns), start, end)
     factor_panel = build_factor_panel(factor_wide, price_df["code"].unique(), signal_dates)
 
-    if pool is None:
-        universe, members_df, user_mask = "all", None, None
-    elif isinstance(pool, str):
-        universe, members_df, user_mask = pool, load_index_members(pool), None
-    else:
-        universe, members_df, user_mask = "user", None, pool
-    st_intervals = load_st_intervals() if exclude_st else None
-    mask = build_universe_mask(
-        factor_panel, price_df, signal_dates, universe,
-        members_df=members_df, user_mask=user_mask,
-        exclude_st=exclude_st, st_intervals=st_intervals, exclude_bj=exclude_bj,
-    )
+    mask = _build_pool_mask(factor_panel, price_df, signal_dates, pool, exclude_st, exclude_bj)
 
     group_labels = _select_group(factor_panel, mask, selection, direction)
     sel_group = int(group_labels.max().max())                  # top_n→1，top_group→n_groups（顶组）

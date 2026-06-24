@@ -101,3 +101,21 @@ def test_plot_cash_dashboard_outputs(tmp_path):
     assert out[0].endswith("现金回测仪表盘.png")
     import os
     assert os.path.getsize(path) > 0, "大图为空"
+
+
+def _fake_ic():
+    """最小 IC dict（compute_factor_ic 同结构），仅供仪表盘渲染冒烟，不验 IC 数值。"""
+    idx = pd.to_datetime(["2024-01-31", "2024-02-29", "2024-03-29", "2024-04-30", "2024-05-31"])
+    s = pd.Series([0.05, -0.02, 0.08, 0.01, 0.03], index=idx)
+    return {"ic_series": s, "rankic_series": s * 0.9, "ic_cum": s.cumsum(),
+            "ic_mean": float(s.mean()), "ic_ir": 0.5, "ic_ir_annual": 1.2, "ic_t": 2.1,
+            "ic_winrate": 0.6, "rankic_mean": float((s * 0.9).mean()), "rankic_ir": 0.4, "rankic_t": 1.8}
+
+
+def test_plot_cash_dashboard_with_ic(tmp_path):
+    """冒烟：--factor 路径带 IC → 大图加第 5 行 IC 时间序列、指标表注入 IC 标量，端到端落盘非空。"""
+    m = mk_market([A, B], close=12.0)
+    res = run_bt(m, {D[1]: {A: 0.6, B: 0.4}, D[3]: {A: 0.4, B: 0.6}})
+    path = plot_cash_dashboard(res, save_dir=str(tmp_path), title="带IC测试", ic=_fake_ic())
+    import os
+    assert path.endswith("现金回测仪表盘.png") and os.path.getsize(path) > 0, "带 IC 大图为空"

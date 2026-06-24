@@ -21,7 +21,7 @@ import yaml
 from data.loaders import load_calendar, load_price_df, load_index_eod, CACHE_ROOT
 from engine.backtest import run_backtest, calc_benchmark, DEFAULT_CONFIG
 from engine.cash_engine import run_cash_backtest, BacktestConfig
-from factor.factor_test import run_factor_test, factor_to_weights
+from factor.factor_test import run_factor_test, factor_to_weights, compute_factor_ic
 from factor.plot_factor import plot_factor_report
 from report.plot import plot_dashboard, plot_cash_dashboard
 
@@ -173,10 +173,12 @@ def cmd_cash(args):
         weights_df = _read_weights_long(args.weights)
         src = Path(args.weights).stem
         cash_end = raw.get("end_date")                   # weights 路径：end 截断回测窗口
+        ic = None                                        # 无因子 → 无 IC
     else:
         sel = raw.get("selection", ["top_n", 200])       # YAML: [top_n, 200] / [top_group, 10]
+        factor_wide = _read_factor_wide(args.factor)     # 读一次，factor_to_weights 与 IC 共用
         weights_df = factor_to_weights(
-            _read_factor_wide(args.factor),
+            factor_wide,
             rebalance=raw.get("rebalance", "M"),
             pool=_parse_pool(args.pool),
             exclude_st=raw.get("exclude_st", False),
@@ -185,6 +187,15 @@ def cmd_cash(args):
             direction=raw.get("direction", 1),
             exclude_bj=raw.get("exclude_bj", False),       # 剔北交所（.BJ）
             end=raw.get("end_date"),                      # end 已封顶因子窗口
+        )
+        # IC 与 factor_to_weights 同 rebalance/pool/exclude_st/exclude_bj/end（信号日口径、全票池）
+        ic = compute_factor_ic(
+            factor_wide,
+            rebalance=raw.get("rebalance", "M"),
+            pool=_parse_pool(args.pool),
+            exclude_st=raw.get("exclude_st", False),
+            exclude_bj=raw.get("exclude_bj", False),
+            end=raw.get("end_date"),
         )
         src = Path(args.factor).stem
         cash_end = None                                  # 让最后一个滞后成交日(信号日+1)自然执行
@@ -203,7 +214,13 @@ def cmd_cash(args):
     res.trade_log.to_csv(out / "买卖往返.csv", index=False)
     res.missing_log.to_csv(out / "退市清算.csv", index=False)
     res.blocked_log.to_csv(out / "成交受阻.csv", index=False)
-    fig = plot_cash_dashboard(res, args.out, title=f"现金回测仪表盘（{src}）")
+    if ic is not None:                                    # --factor 路径才有 IC（复用 bt factor 同格式）
+        pd.DataFrame({"每期IC": ic["ic_series"], "每期RankIC": ic["rankic_series"], "累计IC": ic["ic_cum"]}).to_csv(
+            out / "IC明细.csv", encoding="utf-8-sig")
+        pd.Series({k: ic[k] for k in ("ic_mean", "ic_ir", "ic_ir_annual", "ic_t", "ic_winrate",
+                                      "rankic_mean", "rankic_ir", "rankic_t")}).to_csv(
+            out / "IC统计.csv", encoding="utf-8-sig")
+    fig = plot_cash_dashboard(res, args.out, title=f"现金回测仪表盘（{src}）", ic=ic)
 
     a, e = res.metrics_abs, res.metrics_excess
     held = int((res.holdings.iloc[-1] > 0).sum())
@@ -211,6 +228,9 @@ def cmd_cash(args):
     print(f"  净值终值={res.strategy_nav.iloc[-1]:.4f}  年化={a['年化收益']:.2%}  夏普={a['夏普']:.2f}  最大回撤={a['最大回撤']:.2%}")
     print(f"  超额年化={e['超额年化']:.2%}  信息比率={e['信息比率']:.2f}  超额最大回撤={e['超额最大回撤']:.2%}")
     print(f"  末日持仓={held} 只  成交={len(res.trades)} 笔  退市清算={len(res.missing_log)} 只  受阻={len(res.blocked_log)} 次  → {fig}")
+    if ic is not None:
+        print(f"  IC均值={ic['ic_mean']:.4f}  ICIR年化={ic['ic_ir_annual']:.2f}  IC_t={ic['ic_t']:.2f}  "
+              f"IC胜率={ic['ic_winrate']:.1%}  RankIC均值={ic['rankic_mean']:.4f}")
 
 
 def main():

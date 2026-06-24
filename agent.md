@@ -6,7 +6,7 @@
 
 - **项目名称**: 端到端回测框架
 - **创建日期**: 2026-05-26
-- **最后更新**: 2026-06-22 (**现金回测接入完整仪表盘**：BacktestResult 加 weights/trade_records，复用 build_report_data + 全部子图出 `现金回测仪表盘.png`；plot_dashboard 拆 build/render 两路共用；对抗验证抓出并修锚点伪首期 bug；新增 test_cash_dashboard 6 测试，全套 87 passed + 真实数据对标过。同日另：拉取上游 2 提交——北交所复权守卫 `validate_adjclose_quality` + 换手/开仓/容量多处修复 + `exclude_bj`。详见变更日志 2026-06-22)
+- **最后更新**: 2026-06-24 (**现金回测 --factor 报告 IC**：新增 `factor_test.compute_factor_ic`（复用 `compute_ic`，信号日/全票池/调仓期前向收益，不另造 IC 算法）+ 抽 `_build_pool_mask` 去重；`plot.py` 加 `_plot_ic`、`_render_dashboard`/`plot_cash_dashboard` 加可选 `ic`（仪表盘第 5 行 IC 时序 + 指标表 5 个 IC 标量）；`cmd_cash --factor` 算/印 IC + 落 `IC明细`/`IC统计.csv`（`--weights` 跳过）。2 新测试，全套 **89 passed**；真实数据 `compute_factor_ic`≡`run_factor_test['ic']` 逐点一致 + cli 端到端验过。详见变更日志 2026-06-24。<br>上一更新 2026-06-22：现金回测接入完整仪表盘 + 拉取上游北交所复权守卫等，详见变更日志 2026-06-22)
 - **⚠️ 新环境必跑一次**: `conda activate torch1010 && pip install -e .`（在 backtest 根目录），否则跨层导入 `from engine.backtest import` 等会 ModuleNotFoundError；装完即有 `bt` 命令
 - **命令行入口**: `bt factor --factor 因子.parquet --config cfg.yaml --out 目录` / `bt backtest --weights 权重.parquet --config cfg.yaml --out 目录` / `bt cash {--weights 权重.parquet | --factor 因子.parquet} --benchmark 指数代码 --config cfg.yaml --out 目录`（cash 二选一：--weights 直接吃权重做对标 / --factor 内部 factor_to_weights→权重；配置样例见 `examples/`）
 - **当前状态**: 阶段 2/3/4/5/6/7a 完成（权重引擎 + 现金引擎 + 指标 + 过滤 + 可视化）
@@ -428,7 +428,7 @@ analysis/
 | 功能 | 状态 | 实现日期 | 说明 |
 |------|------|----------|------|
 | report/plot.py · plot_dashboard | ✅ 完成 | 2026-06-03 | 机构研报风仪表盘 11 图+指标表 + 持仓分析 + 关键单图；**子图只吃 ReportData，一行加工都不算**（原 8 处加工已搬到 build_report_data）；全中文。**2026-06-22 拆出 `_render_dashboard(rd,…)` 只渲染，plot_dashboard=build+render（行为不变），两路引擎共用** |
-| report/plot.py · plot_cash_dashboard | ✅ 完成 | 2026-06-22 | 现金引擎 BacktestResult → 同款完整仪表盘：适配成 dict→build_report_data→`_drop_pre_start_phantom`(修建仓锚点伪首期)→`_render_dashboard`，出 现金回测仪表盘.png。**替代旧 plot_cash_report（已删）** |
+| report/plot.py · plot_cash_dashboard | ✅ 完成 | 2026-06-22 | 现金引擎 BacktestResult → 同款完整仪表盘：适配成 dict→build_report_data→`_drop_pre_start_phantom`(修建仓锚点伪首期)→`_render_dashboard`，出 现金回测仪表盘.png。**替代旧 plot_cash_report（已删）**。**2026-06-24 加可选 `ic` 参数：非空→指标表注入 5 个 IC 标量 + 大图第 5 行 `_plot_ic`（每期 IC 柱+累计 IC 线）；`--weights` 路径 ic=None 不含 IC** |
 | report/test_report.py + test_cash_dashboard.py | ✅ 完成 | 2026-06-22 | report 6 测试（指标手算/单调/含基准/过短raise/出图落盘/缺基准不报错）+ 现金仪表盘 6 测试（C1 标量==引擎/C3 权重归一/C5 跨年·跨月·同月锚点/出图落盘） |
 
 ### 模块: factor/因子研究层（引擎上游）
@@ -436,6 +436,7 @@ analysis/
 | 功能 | 状态 | 实现日期 | 说明 |
 |------|------|----------|------|
 | factor/factor_test.py | ✅ 完成 | 2026-06-02 | run_factor_test(factor_wide,config) → IC/RankIC、十分组净值(走run_backtest)、单独多/空、多空(weight_mode='long_short' 100/100)、超额。不ffill+缺失raise、价格可用mask、因子加权带direction、ST可选剔。**分组绩效复用 analysis.calc_metrics（原自带 _nav_metrics 已删，消副本）**。**基准=外部指数（必填，缺省 raise）：bench_nav/metrics["基准"]/excess/meta 四处统一指 cfg["benchmark"]，2026-06-03 删除池内等权兜底（见变更日志）**。**ICIR 年化：自定义调仓日列表用 365.25/日历gap（与字符串 W=52/M=12 对齐，2026-06-03 修原 252/日历gap 混单位 bug）** |
+| factor/factor_test.py · compute_factor_ic | ✅ 完成 | 2026-06-24 | `compute_factor_ic(factor_wide, rebalance, pool, exclude_st, exclude_bj, start, end)` → IC 统计 dict（**复用 compute_ic，不另造**）。信号日口径（`make_rebalance_dates`，非成交日+1）、全票池（选股前）、调仓期前向收益（`compute_forward_returns` 沿日历 shift）。供 `bt cash --factor` 报 IC；与 `factor_to_weights` 同参→IC 与执行票池对齐。**抽 `_build_pool_mask`(pool→mask) 去重，factor_to_weights 改调它（行为不变）** |
 | factor/plot_factor.py | ✅ 完成 | 2026-06-03 | **因子「画」层**（与 report/plot.py 对称），消费 run_factor_test 的 result：`plot_factor_report(result, out_dir, weighting='equal')` 出 7 图+6 CSV（全中文）。原 factor_test._dump_outputs 的 5 图整体搬入；**新增 ① 滚动IC/RankIC/ICIR（窗=调仓期数，复用 _PPY，与 IC 年化口径一致；≠ic_cum 累计）② 滚动夏普/波动（窗=252日，`build_report_data({"nav":那条})` 复用，不手写）**。factor_test.py 同步删 _dump_outputs/_setup_chinese_font/result_dir，退回纯产数据（见变更日志）。**2026-06-03 净值图带基准：图② 叠加基准指数虚线、图⑤ 由「多头超额单线」改「多头 vs 基准 绝对净值双线」(文件名→多头与基准净值.png)；基准重锚口径复用 build_report_data.bench_norm，② ⑤ ⑦ 共用一次 rd_long（见变更日志）** |
 | factor/test_factor_test.py | ✅ 完成 | 2026-06-02 | 合成数据全 assert + --real 真实数据 sanity |
 | analysis/test_factor_test.py | ✅ 完成 | 2026-06-02 | 合成单调因子全assert（IC≈+1/十分组单调/多空100·100=NAV1.03/因子加权空头最差股权重最大/avail剔退市/指定池缺因子raise）+ --real 动量sanity |
@@ -443,6 +444,19 @@ analysis/
 ---
 
 ## 📜 变更日志
+
+### [2026-06-24] - 现金回测 --factor 报告 IC（复用 compute_ic，不另造 IC 算法）
+
+**需求**：`bt cash` 此前不报 IC。加进去——但 IC 是因子在票池横截面的预测力，与整手/现金/涨跌停执行约束无关，故仅 `--factor` 路径可算（`--weights` 无因子跳过），且在**全票池、信号日口径**算（非成交日、非持仓票）。
+
+**新增/改动**：
+- **factor_test.py**：新增公开 `compute_factor_ic(factor_wide, rebalance, pool, exclude_st, exclude_bj, start, end) -> dict`，复用 `make_rebalance_dates`(信号日)/`build_factor_panel`/`compute_forward_returns`(沿日历 shift)/`compute_ic`——IC 数学零重写。抽 `_build_pool_mask`(pool→universe/mask) 去重，`factor_to_weights` 改调它（行为不变）。
+- **report/plot.py**：新增 `_plot_ic(ax, ic)`（每期 IC 柱 + 累计 IC 线）；`_render_dashboard` 加可选 `ic`（非空→第 5 行 IC 时序，4→5 行；权重路径不传 ic 仍 4 行、逐点不变）；`_plot_metrics_table` 加 5 个 IC 可选键；`plot_cash_dashboard` 加 `ic` 参数（注入 IC 标量进 rd.metrics + 透传 _render_dashboard）。
+- **cli.py · cmd_cash**：`--factor` 分支因子读一次复用，`compute_factor_ic`(同 factor_to_weights 参) → 传图 + 终端打印 IC 行 + 落 `IC明细.csv`/`IC统计.csv`（复用 bt factor 同格式）；`--weights` 分支 `ic=None` 全跳过。
+
+**头号坑（信号日 vs 成交日）**：`factor_to_weights` 把权重从信号日(读因子)位移到成交日(信号日+1，无未来约束)；IC 必须用信号日——成交日(月初)因子宽表多为空 → IC 全 NaN。`compute_factor_ic` 内部 `make_rebalance_dates` 出信号日、不做 +1 位移。
+
+**验收**：test_factor_test 加 `test_compute_factor_ic_uses_signal_dates`（monkeypatch 合成数据，断言 IC index=信号日 + 与手拼 IC 逐点一致）、test_cash_dashboard 加 `test_plot_cash_dashboard_with_ic`（5 行大图落盘），全套 **89 passed**。真实数据(2022 动量)：`compute_factor_ic` ≡ `run_factor_test['ic']` 8 标量 + ic_series/rankic_series **逐点相等**；cli 端到端 IC 进终端/CSV/仪表盘第 5 行验过（动量负 IC=-0.066，A股反转效应）。
 
 ### [2026-06-22] - 现金回测接入完整仪表盘（复用权重引擎那套 13 图，不另造）
 
